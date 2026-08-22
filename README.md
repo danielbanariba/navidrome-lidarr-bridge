@@ -102,8 +102,19 @@ Lidarr still picks the change up on its own six-hour refresh.
 `/request` takes either a Lidarr album id or a MusicBrainz release-group id.
 Lidarr stores that release-group id as `foreignAlbumId`, so a caller that
 already speaks MusicBrainz — as any MusicBrainz-driven panel does — needs no
-translation step. A `404` means Lidarr has not imported that artist yet, which
-is a different problem from the album not existing, so it says so.
+translation step.
+
+An album whose artist Lidarr has never imported is still requestable: Lidarr
+resolves a release-group id to its artist even for artists it does not hold, so
+the bridge imports that artist and carries on rather than sending the caller
+away to add it first. The artist is added with `monitor: none`, and only the one
+album that was actually asked for is then monitored — added the usual way, a
+single click would queue the entire discography.
+
+That last step has an order to it. Lidarr accepts a write monitoring an album
+whose artist is unmonitored, and then silently drops the flag, so the artist has
+to be monitored first. Profiles and root folder for the new artist are read from
+the import list, so a requested artist lands exactly where a starred one would.
 
 ## The panel inside Navidrome
 

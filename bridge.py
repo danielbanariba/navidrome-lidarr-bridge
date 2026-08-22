@@ -42,6 +42,8 @@ LIDARR_API_KEY = os.environ.get("LIDARR_API_KEY", "")
 # Which import list to refresh when the published set changes. Left empty the
 # bridge discovers it, which only works while exactly one CustomImport exists.
 LIDARR_IMPORTLIST_ID = os.environ.get("LIDARR_IMPORTLIST_ID", "").strip()
+# How long to wait for Lidarr to list an album after its artist is imported.
+IMPORT_WAIT_SECONDS = int(os.environ.get("IMPORT_WAIT_SECONDS", "45"))
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", "900"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8687"))
 STATE_DIR = os.environ.get("STATE_DIR", "/state")
@@ -273,6 +275,60 @@ def missing_albums(nd_artist_id: str) -> dict:
             "lidarrArtistId": match["id"], "missing": missing}
 
 
+def importlist_defaults() -> dict:
+    """Quality profile, metadata profile and root folder for a newly added artist.
+
+    Taken from the import list rather than from configuration of our own: an
+    artist arriving through a request should land exactly where a starred one
+    would, and there is no reason to have two places that can disagree.
+    """
+    list_id = importlist_id()
+    for item in lidarr_get("/api/v1/importlist"):
+        if item.get("id") == list_id:
+            return {
+                "qualityProfileId": item["qualityProfileId"],
+                "metadataProfileId": item["metadataProfileId"],
+                "rootFolderPath": item["rootFolderPath"],
+            }
+    raise BridgeError(f"import list {list_id} disappeared")
+
+
+def import_artist_for(mbid: str) -> int:
+    """Add the artist owning this album to Lidarr, and return the album's id.
+
+    Lidarr resolves an album's MusicBrainz id to its artist even for artists it
+    has never imported, so a request for an unmonitored artist does not have to
+    bounce back to the user asking them to add it first.
+
+    The artist is added with monitor "none": the caller monitors the one album
+    that was actually requested. Adding with the usual "all" would queue the
+    entire discography off a single click.
+    """
+    found = lidarr_get("/api/v1/album/lookup?" + urllib.parse.urlencode({"term": f"lidarr:{mbid}"}))
+    if not isinstance(found, list) or not found:
+        raise BridgeError(f"no album in Lidarr's catalogue for {mbid}")
+    artist = (found[0] or {}).get("artist") or {}
+    if not artist.get("foreignArtistId"):
+        raise BridgeError(f"Lidarr's catalogue has no artist for album {mbid}")
+
+    payload = dict(artist)
+    payload.update(monitored=True, **importlist_defaults())
+    payload["addOptions"] = {"monitor": "none", "searchForMissingAlbums": False}
+    _post_json(f"{LIDARR_URL}/api/v1/artist", payload, {"X-Api-Key": LIDARR_API_KEY})
+    log.info("imported artist %r for album %s", artist.get("artistName"), mbid)
+
+    # The discography is fetched asynchronously, so the album is not there the
+    # instant the artist is.
+    deadline = time.monotonic() + IMPORT_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        album_id = album_id_for_mbid(mbid)
+        if album_id is not None:
+            return album_id
+        time.sleep(1)
+    raise BridgeError(
+        f"added {artist.get('artistName')!r}, but Lidarr has not listed the album yet")
+
+
 def album_id_for_mbid(mbid: str) -> int | None:
     """The Lidarr album for a MusicBrainz release-group id, if it knows one.
 
@@ -289,11 +345,23 @@ def album_id_for_mbid(mbid: str) -> int | None:
 
 def request_album(album_id: int) -> dict:
     """Ask Lidarr to monitor an album and go look for it now."""
+    key = {"X-Api-Key": LIDARR_API_KEY}
     album = lidarr_get(f"/api/v1/album/{album_id}")
+
+    # An album will not stay monitored while its artist is not: Lidarr accepts
+    # the write and drops the flag. An artist imported on demand arrives
+    # unmonitored — that is what keeps its whole discography out of the queue —
+    # so the artist has to be lifted before the one requested album can be.
+    artist_id = album.get("artistId") or (album.get("artist") or {}).get("id")
+    if artist_id:
+        artist = lidarr_get(f"/api/v1/artist/{artist_id}")
+        if not artist.get("monitored"):
+            artist["monitored"] = True
+            _put_json(f"{LIDARR_URL}/api/v1/artist/{artist_id}", artist, key)
+
     if not album.get("monitored"):
         album["monitored"] = True
-        _put_json(f"{LIDARR_URL}/api/v1/album/{album_id}", album,
-                  {"X-Api-Key": LIDARR_API_KEY})
+        _put_json(f"{LIDARR_URL}/api/v1/album/{album_id}", album, key)
     _post_json(f"{LIDARR_URL}/api/v1/command",
                {"name": "AlbumSearch", "albumIds": [album_id]},
                {"X-Api-Key": LIDARR_API_KEY})
@@ -563,12 +631,13 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("albumId") is not None:
                 album_id = int(body["albumId"])
             elif body.get("mbid"):
-                album_id = album_id_for_mbid(str(body["mbid"]))
+                mbid = str(body["mbid"])
+                album_id = album_id_for_mbid(mbid)
                 if album_id is None:
-                    # Lidarr only holds albums of artists it imported.
-                    self._respond({"error": "Lidarr does not know this album — "
-                                            "star the artist in Navidrome first"}, 404)
-                    return
+                    # Lidarr only holds albums of artists it imported, and being
+                    # sent away to add the artist first is a poor answer to
+                    # "fetch me this album". Import it and carry on.
+                    album_id = import_artist_for(mbid)
             else:
                 raise KeyError("albumId")
         except (ValueError, KeyError, TypeError, AttributeError):
