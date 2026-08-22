@@ -1,0 +1,8 @@
+# Credentials: NAVIDROME_PASS and LIDARR_API_KEY live here.
+.env
+
+# Runtime state: resolved ids, hand-pinned overrides, last published set.
+state/
+
+__pycache__/
+*.pyc

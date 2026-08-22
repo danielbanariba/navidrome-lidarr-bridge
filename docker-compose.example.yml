@@ -1,0 +1,47 @@
+# Drop this service into the compose file that already runs Lidarr, on the same
+# network, then `docker compose up -d --build navidrome-lidarr-bridge`.
+#
+# Navidrome is assumed to run on the host rather than as a compose service,
+# which is why the bridge reaches it through the host gateway.
+
+services:
+  navidrome-lidarr-bridge:
+    build: ./navidrome-lidarr-bridge
+    image: navidrome-lidarr-bridge:local
+    container_name: navidrome-lidarr-bridge
+    restart: unless-stopped
+    # Not a LinuxServer image, so PUID/PGID are ignored: set the uid directly
+    # to keep the state volume owned by the host user instead of root.
+    user: "1000:1000"
+    env_file:
+      - ./navidrome-lidarr-bridge/.env
+    volumes:
+      - ./navidrome-lidarr-bridge/state:/state
+    # Lidarr reaches the bridge over the shared network by container name, so
+    # the published port is only for local inspection and stays on loopback.
+    ports:
+      - "127.0.0.1:8687:8687"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [servarr]
+
+  # Optional. Serves Navidrome with the panel injected, so the missing-album UI
+  # works in every browser and on phones without installing a userscript.
+  # Navidrome itself keeps serving its own port, untouched.
+  navidrome-panel:
+    image: nginx:alpine
+    container_name: navidrome-panel
+    restart: unless-stopped
+    volumes:
+      - ./navidrome-lidarr-bridge/nginx/navidrome-panel.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "4534:4534"
+    depends_on:
+      - navidrome-lidarr-bridge
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [servarr]
+
+networks:
+  servarr:
+    name: servarr
