@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Navidrome - Álbumes Faltantes
 // @namespace    navidrome-missing-albums
-// @version      6.2
+// @version      6.3
 // @description  Albums faltantes en gris + boton para solicitarlos a Lidarr + sidebar "Not Favourites"
 // @match        *://localhost:4533/*
-// @match        *://localhost:4533/app/*
-// @match        *://localhost:4533/app
+// @match        *://localhost:4534/*
+// @match        *://navidrome.localhost/*
+// @match        *://*.localhost/app/*
 // @include      http://localhost:4533/*
 // @include      http://localhost:4533/app*
 // @run-at       document-idle
@@ -20,7 +21,16 @@
   const CAA_BASE = "https://coverartarchive.org";
   // Puente hacia Lidarr. Recibe el mismo release-group MBID que ya usa este
   // script, porque Lidarr guarda ese id como foreignAlbumId.
-  const BRIDGE = `${location.protocol}//${location.hostname}:8687`;
+  //
+  // Contra Navidrome directo en :4533 hay que ir a su puerto. Detras de un proxy
+  // el puente se monta en el mismo origen bajo /ndlb, que ademas es lo unico que
+  // funciona si la pagina va por HTTPS: un fetch a http://host:8687 desde una
+  // pagina https es mixed content y el navegador lo bloquea.
+  const BRIDGE =
+    window.__NDLB_BASE ||
+    (location.port === "4533"
+      ? `${location.protocol}//${location.hostname}:8687`
+      : "/ndlb");
   const CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
   const MARKER = "data-missing-album";
 
