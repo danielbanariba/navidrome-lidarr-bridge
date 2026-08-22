@@ -19,8 +19,7 @@ touching anything.
 3. In Lidarr, add an import list of type **Custom List** pointing at
    `http://navidrome-lidarr-bridge:8687/artists.json`, with the quality profile
    and root folder you want new artists to use.
-4. Install a panel in Navidrome — either the userscript in `userscript/`, or the
-   nginx config in `nginx/` to inject it for every browser. See
+4. Install a panel in Navidrome — see
    [The panel inside Navidrome](#the-panel-inside-navidrome).
 
 Star an artist and it appears in Lidarr within `REFRESH_SECONDS`.
@@ -114,11 +113,14 @@ and websocket, and none of them renders anything. `ui/src/plugin/` is the admin
 screen *for* plugins, not an extension point. So the panel is injected, and
 there are two ways to do it.
 
-**A userscript.** `userscript/navidrome-missing-albums.user.js` reads the full
+**A userscript.** [navidrome-missing-albums-userscript][mau] reads the full
 discography from MusicBrainz, greys out the albums you do not have inside
-Navidrome's own grid, and puts a request button over each cover. Install it in
-Tampermonkey or Violentmonkey. The simpler `/panel.user.js` served by the bridge
-is an alternative that draws a floating card instead.
+Navidrome's own grid, and puts a request button over each cover — it probes this
+bridge and only draws the button when it answers. Install it in Tampermonkey or
+Violentmonkey; it self-updates. The `/panel.user.js` served by this bridge is a
+simpler alternative that draws a floating card instead.
+
+[mau]: https://github.com/danielbanariba/navidrome-missing-albums-userscript
 
 **An nginx front.** `nginx/navidrome-panel.conf` proxies Navidrome and injects
 the panel into the HTML with `sub_filter`, so every browser and phone gets it

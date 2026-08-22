@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Navidrome - Álbumes Faltantes
 // @namespace    navidrome-missing-albums
-// @version      6.3
+// @version      6.4
 // @description  Albums faltantes en gris + boton para solicitarlos a Lidarr + sidebar "Not Favourites"
 // @match        *://localhost:4533/*
 // @match        *://localhost:4534/*
@@ -165,16 +165,30 @@
   function normalize(name) {
     return name
       .toLowerCase()
-      .replace(/\s*\(.*?\)\s*/g, "")
-      .replace(/\s*\[.*?\]\s*/g, "")
-      .replace(/[^\w\s]/g, "")
+      .replace(/\s*\(.*?\)\s*/g, " ")
+      .replace(/\s*\[.*?\]\s*/g, " ")
+      // Por espacio y no por vacio: borrando el guion, "Revenge-10th" quedaba
+      // "revenge10th" y dejaba de empezar por "revenge", que es justo lo que
+      // mira el match por prefijo de abajo.
+      .replace(/[^\w\s]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
   }
 
   function findMissing(localAlbums, mbAlbums) {
-    const local = new Set(localAlbums.map((a) => normalize(a.name)));
-    return mbAlbums.filter((a) => !local.has(normalize(a.title)));
+    const local = localAlbums.map((a) => normalize(a.name));
+
+    // Un disco propio suele traer un sufijo de edicion que el catalogo no tiene
+    // — "...Revenge-10th Anniversary Edition" contra "...Revenge" — y no siempre
+    // viene entre parentesis, asi que hace falta el prefijo. Solo en esa
+    // direccion: un titulo propio corto no debe satisfacer una entrada distinta
+    // que lo extiende.
+    const owned = (title) => {
+      const key = normalize(title);
+      return local.some((have) => have === key || have.startsWith(key + " "));
+    };
+
+    return mbAlbums.filter((a) => !owned(a.title));
   }
 
   // ── DOM ──────────────────────────────────────────────────
