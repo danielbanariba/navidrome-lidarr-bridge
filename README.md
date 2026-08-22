@@ -154,3 +154,29 @@ instead of looking fine forever.
 Copy `.env.example` to `.env` and fill in the Navidrome credentials and the
 Lidarr API key. Unstarring an artist removes them from the feed on the next
 sync; Lidarr keeps artists it already added unless the list is set to remove.
+
+## Behind a reverse proxy
+
+Serving Navidrome under a hostname breaks two things at once: the userscript's
+`@match` no longer fires, and — once the proxy terminates TLS — the page can no
+longer call the bridge on plain `http://host:8687`, because a browser blocks
+that as mixed content.
+
+Mount the bridge on the same origin instead. Caddy:
+
+```caddyfile
+navidrome.example {
+    handle_path /ndlb/* {
+        reverse_proxy localhost:8687
+    }
+
+    reverse_proxy localhost:4533
+}
+```
+
+`handle_path` strips the prefix, so `/ndlb/missing` arrives as `/missing`. The
+equivalent nginx block is in `nginx/navidrome-panel.conf`.
+
+The userscript picks the right target on its own: it uses the bridge's port only
+when the page is Navidrome's own `:4533`, and the same-origin `/ndlb` prefix
+everywhere else. Add the proxy host to its `@match` list.
