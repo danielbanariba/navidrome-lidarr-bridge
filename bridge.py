@@ -316,6 +316,40 @@ def discogs_discography(artist_id: int) -> list[dict]:
     return sorted(out.values(), key=lambda a: a["year"] or "9999")
 
 
+def owns_title(owned: set[str], title: str) -> bool:
+    """Whether the library already holds this catalogue title.
+
+    An owned copy often carries an edition suffix the catalogue title does not
+    — "Raping Uranus: The Lost Tracks Of Alien Fucker" against plain "Raping
+    Uranus" — and those suffixes are not always parenthesised, so a prefix
+    match catches them. Only in that direction: an owned plain title must not
+    satisfy a distinct catalogue entry that extends it, such as a live
+    recording named after the studio album.
+
+    Both the missing list and identity checking ask this question, and they
+    have to answer it the same way. When they disagreed, an artist whose only
+    shared record carried such a suffix looked like a different band entirely.
+    """
+    key = norm_title(title)
+    return any(have == key or have.startswith(key + " ") for have in owned)
+
+
+def catalogue_overlap(mbid: str, owned: set[str]) -> tuple[set[str], int]:
+    """What an artist's catalogue shares with the library, and its size.
+
+    A catalogue that could not be read, or that lists nothing at all, reports
+    zero for both. That distinction matters: absence of evidence is not
+    evidence of a mismatch, and only a real discography that shares nothing
+    with a real library says anything about identity.
+    """
+    try:
+        albums = musicbrainz_albums(mbid)
+    except FETCH_ERRORS as exc:
+        log.warning("discography lookup failed for %s: %s", mbid, exc)
+        return set(), 0
+    return {t for t in albums if owns_title(owned, t)}, len(albums)
+
+
 def disambiguate(candidates: list[dict], owned: set[str]) -> tuple[dict | None, list[dict]]:
     """Pick the artist whose discography contains the albums already owned.
 
@@ -328,12 +362,8 @@ def disambiguate(candidates: list[dict], owned: set[str]) -> tuple[dict | None, 
     """
     scored = []
     for cand in candidates:
-        try:
-            albums = musicbrainz_albums(cand["foreignArtistId"])
-        except FETCH_ERRORS as exc:
-            log.warning("discography lookup failed for %s: %s", cand["foreignArtistId"], exc)
-            albums = set()
-        scored.append({"candidate": cand, "overlap": owned & albums, "total": len(albums)})
+        overlap, total = catalogue_overlap(cand["foreignArtistId"], owned)
+        scored.append({"candidate": cand, "overlap": overlap, "total": total})
     scored.sort(key=lambda s: len(s["overlap"]), reverse=True)
 
     report = [
@@ -465,17 +495,7 @@ def missing_albums(nd_artist_id: str) -> dict:
     owned = {norm_title(a["name"]) for a in artist.get("album", []) if a.get("name")}
 
     def is_owned(title: str) -> bool:
-        """Whether the library already holds this album.
-
-        An owned copy often carries an edition suffix the catalogue title does
-        not — "…Revenge-10th Anniversary Edition" against plain "…Revenge" —
-        and those suffixes are not always parenthesised, so a prefix match
-        catches them. Only in that direction: an owned plain title must not
-        satisfy a distinct catalogue entry that extends it, such as a live
-        recording named after the studio album.
-        """
-        key = norm_title(title)
-        return any(have == key or have.startswith(key + " ") for have in owned)
+        return owns_title(owned, title)
 
     overrides, _ = _read_overrides()
     mbid = overrides.get(name) or _load(CACHE_PATH, {}).get(name)
@@ -645,10 +665,15 @@ def request_album(album_id: int) -> dict:
 def resolve(name: str, nd_artist_id: str | None = None) -> tuple[str | None, str, list[dict]]:
     """Map an artist name to a MusicBrainz id.
 
-    Returns (mbid, reason, candidates). One exact match resolves outright. When
-    several artists share the name, the library itself decides: the one whose
-    catalogue contains the albums already owned is the right one. Only a name
-    that nothing distinguishes is left for a human.
+    Returns (mbid, reason, candidates). The library decides, not the name: a
+    candidate is right when its catalogue contains albums already owned. When
+    several artists share a name, that picks the one; when only one artist
+    carries the name, it still has to pass, because being the only match is not
+    the same as being the right band. Only a name that nothing distinguishes,
+    or that everything contradicts, is left for a human.
+
+    The check is a veto, never a requirement. A catalogue that cannot be read,
+    or that lists nothing, proves nothing and lets the match stand.
 
     A failed lookup must never abort the caller's whole sync, so every network
     and decoding error is turned into an unresolved result.
@@ -666,10 +691,10 @@ def resolve(name: str, nd_artist_id: str | None = None) -> tuple[str | None, str
     ]
     if not exact:
         return None, "not found in MusicBrainz", []
-    if len(exact) == 1:
-        return exact[0]["foreignArtistId"], "ok", []
 
     if not nd_artist_id:
+        if len(exact) == 1:
+            return exact[0]["foreignArtistId"], "ok", []
         return None, f"ambiguous: {len(exact)} artists share this name", [
             {"mbid": a["foreignArtistId"], "disambiguation": a.get("disambiguation") or ""}
             for a in exact
@@ -678,7 +703,23 @@ def resolve(name: str, nd_artist_id: str | None = None) -> tuple[str | None, str
     try:
         owned = owned_titles(nd_artist_id)
     except FETCH_ERRORS as exc:
+        if len(exact) == 1:
+            # Nothing to check it against, and nothing else it could be.
+            return exact[0]["foreignArtistId"], "ok", []
         return None, f"ambiguous, and the library could not be read: {exc}", []
+
+    if len(exact) == 1:
+        only = exact[0]
+        mbid = only["foreignArtistId"]
+        overlap, catalogue = catalogue_overlap(mbid, owned)
+        if overlap or not catalogue:
+            return mbid, "ok", []
+        return None, (
+            f"the only MusicBrainz artist by this name lists {catalogue} albums "
+            f"and shares none of the {len(owned)} the library holds"
+        ), [{"mbid": mbid,
+             "disambiguation": only.get("disambiguation") or "",
+             "albums_in_common": []}]
 
     winner, report = disambiguate(exact, owned)
     if winner is None:

@@ -44,14 +44,32 @@ problem back.
 
 But unrelated bands sharing a name do not share a back catalogue. Holding
 `Abismo` and `Los signos del Fauno` identifies exactly one of those ten — the
-Honduran metal band — and nothing else comes close. So when several artists
-match a name, each candidate's discography is fetched from MusicBrainz and
-compared against what the library already holds; the one that overlaps wins.
+Honduran metal band — and nothing else comes close. So each candidate's
+discography is fetched from MusicBrainz and compared against what the library
+already holds; the one that overlaps wins.
 
-A tie is not an answer: if two catalogues match equally well, the library cannot
-tell them apart either, and the name is left unresolved. So is a name where
-nothing matches at all. Those appear on `/status` with every candidate and what
-each had in common, so the pin is an informed one:
+**Being the only match is not the same as being the right band.** That check
+first ran only when several artists shared a name, so a single match was taken
+on trust — and exactly one artist in MusicBrainz is called "Nihilismo", a punk
+band that shares not one album with the four under that name here. It was
+accepted without question and the panel offered eight of its records.
+
+A lone candidate is now checked like any other. The check is a veto rather than
+a requirement: a catalogue that cannot be read, or that lists nothing at all,
+proves nothing and lets the match stand, because an artist MusicBrainz happens
+not to cover must not stop resolving.
+
+Titles are compared with one rule, in one place. When identification and the
+missing list answered "does the library have this?" differently, `Raping Uranus`
+in the catalogue and `Raping Uranus: The Lost Tracks Of Alien Fucker` on disk
+counted as owned by one and unknown to the other — and that artist, correctly
+matched, read as a stranger.
+
+A tie is not an answer either: if two catalogues match equally well, the library
+cannot tell them apart, and the name is left unresolved. So is a name where
+nothing matches at all, and one that everything contradicts. Those appear on
+`/status` with every candidate and what each had in common, so the pin is an
+informed one:
 
 ```json
 {
@@ -194,10 +212,93 @@ different statement from "the source is down". `/status` drives the container
 `HEALTHCHECK`, so a service whose syncs keep failing reports `unhealthy`
 instead of looking fine forever.
 
+## Ending the guesswork: `tools/tag-mbids.py`
+
+Every part of this works out which band a folder belongs to by comparing names,
+and each part guesses separately. An id in the file ends the argument.
+
+`tag-mbids.py` writes the MusicBrainz artist, album-artist and release-group ids
+into an artist's files, using the Picard tag names Navidrome's `mappings.yaml`
+already lists as aliases. Navidrome then reports the id over Subsonic and the
+bridge skips name resolution entirely — exact, and free.
+
+It also settles the names no catalogue will ever match, because the library
+spells them its own way: `AC-DC` is never going to find `AC/DC` by asking.
+
+```
+tools/tag-mbids.py --artist <navidrome-artist-id>            # print a plan
+tools/tag-mbids.py --artist <navidrome-artist-id> --apply    # write it
+```
+
+Paths come from Navidrome's own API rather than Subsonic's. The Subsonic `path`
+is synthesised from tags — `Delirium/Abismo/01 - …` for a file that lives four
+directories deeper under a genre tree — so joining it to the music folder yields
+a path that does not exist.
+
+## Judging a release by what is inside it: `tools/best-release.py`
+
+Lidarr can only act on what a release calls itself. Of ten torrents for one
+album here, not one named its format, so every one was classified `Unknown` —
+ranked below the MP3 already held, and therefore never taken as an upgrade. That
+is the right call from Lidarr: it cannot prove any of them is better. The one
+with 39 seeders was MP3.
+
+The only way to know what a release is, is to look. `best-release.py` auditions
+several candidates at once and keeps the best, checking cheapest first:
+
+1. **The torrent's own file list**, which costs no download at all and rules out
+   everything carrying no lossless file.
+2. **The audio streams** of whatever survives: codec, bit depth, sample rate.
+3. **The spectrum**, because a FLAC decoded from an MP3 is still an MP3 — it
+   just weighs more. A 24-bit file padded up from 16-bit is the same lie told
+   about depth, and the bottom eight bits give that one away.
+
+```
+tools/best-release.py --album-id 58                # free pass: look, download nothing
+tools/best-release.py --album-id 58 --download     # audition for real
+```
+
+The verdict is per album, not per track: one odd file does not decide a record.
+What the library already holds competes on the same terms, so an audition that
+finds nothing better says so instead of fetching a copy that changes nothing.
+Losers are deleted and the winner is handed to Lidarr, which imports it the
+ordinary way. Only torrents carrying this tool's own tag are ever deleted.
+
+### Why the spectrum is measured as a cliff
+
+A first attempt compared each track's high frequencies against its loudest bin.
+That bin is always bass, forty to sixty decibels up, so every honest record read
+as cut off around 17 kHz — including a known 320 kbps file whose real shelf is
+at 20.5.
+
+What an encoder leaves behind is a step, not a level: the spectrum runs along,
+falls off a wall, and stays down. Measured that way against files of known
+provenance:
+
+| known file    | drop  | verdict           |
+|---------------|-------|-------------------|
+| MP3 320 CBR   | 57 dB | encoder lowpass   |
+| MP3 V0        | 12 dB | gentler rolloff   |
+| FLAC 16/44    | 13 dB | genuine           |
+| FLAC 24/96    | 3 dB  | genuine           |
+
+A V0 leaves too little wall to catch that way, so it is caught by where it stops
+instead — 20.0 kHz, against 20.9 for a genuine rip of the same era. That margin
+is under a kilohertz and will occasionally demote an honest but dull master. The
+cost of being wrong in that direction is a choice between two lossless copies;
+the cost the other way is keeping a decoded MP3 and never knowing. Every number
+is printed, so the call can be overruled.
+
+Both tools need `mutagen` and `numpy`:
+
+```
+python3 -m venv .venv && .venv/bin/pip install mutagen numpy
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in the Navidrome credentials and the
-Lidarr API key. Unstarring an artist removes them from the feed on the next
+Lidarr API key. `best-release.py` also wants `PROWLARR_API_KEY`. Unstarring an artist removes them from the feed on the next
 sync; Lidarr keeps artists it already added unless the list is set to remove.
 
 ## Installing the panel once and never again
