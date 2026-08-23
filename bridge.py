@@ -449,6 +449,9 @@ def missing_albums(nd_artist_id: str) -> dict:
                 "id": album["id"], "title": album["title"],
                 "year": (album.get("releaseDate") or "")[:4],
                 "type": album.get("albumType", ""), "requestable": True,
+                # The release-group id, so a caller can fetch cover art for an
+                # album nobody owns a copy of.
+                "mbid": album.get("foreignAlbumId"),
             }
     missing = dict(requestable)
 
