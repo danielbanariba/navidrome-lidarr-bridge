@@ -200,6 +200,28 @@ Copy `.env.example` to `.env` and fill in the Navidrome credentials and the
 Lidarr API key. Unstarring an artist removes them from the feed on the next
 sync; Lidarr keeps artists it already added unless the list is set to remove.
 
+## Installing the panel once and never again
+
+`GET /userscript.js` mirrors the panel userscript from its repository and
+rewrites `@updateURL` and `@downloadURL` to point back here. Install from that
+address instead of from GitHub and Tampermonkey then updates itself from the
+bridge, on the same origin as Navidrome — an address a shield or a blocklist
+cannot quietly break, which GitHub's raw host demonstrably can.
+
+After that the loop is: merge upstream, the bridge picks the new version up
+within `USERSCRIPT_TTL`, and Tampermonkey installs it on its next check. Nothing
+to copy by hand.
+
+**`PUBLIC_SCRIPT_URL` is required behind a proxy that strips a path prefix.**
+Caddy's `handle_path` and nginx's `location` both hide the prefix from the
+bridge, so the `@updateURL` it derives comes out missing it — and Tampermonkey
+follows that broken address without complaining, so updates simply stop. Set it
+explicitly:
+
+```
+PUBLIC_SCRIPT_URL=https://navidrome.example/ndlb/userscript.js
+```
+
 ## Behind a reverse proxy
 
 Serving Navidrome under a hostname breaks two things at once: the userscript's

@@ -78,6 +78,22 @@ PUBLISHED_PATH = os.path.join(STATE_DIR, "published.json")
 # The userscript that draws the panel inside Navidrome, served from /panel.user.js.
 PANEL_PATH = os.environ.get("PANEL_PATH", "/app/panel.user.js")
 
+# Where /userscript.js mirrors the panel from, and for how long a copy is kept.
+# Serving it here rather than sending the browser to GitHub keeps the download
+# on the same origin, which a blocklist or a shield cannot quietly break, and
+# lets Tampermonkey update itself from a URL that is always reachable.
+USERSCRIPT_SOURCE = os.environ.get(
+    "USERSCRIPT_SOURCE",
+    "https://raw.githubusercontent.com/danielbanariba/"
+    "navidrome-missing-albums-userscript/main/navidrome-missing-albums.user.js")
+USERSCRIPT_TTL = int(os.environ.get("USERSCRIPT_TTL", "600"))
+# The URL the browser reaches /userscript.js at. Tampermonkey re-checks whatever
+# @updateURL says, so this has to be the address the browser can actually use —
+# not the one the container sees. Left empty it is derived from the request,
+# which is right when the bridge is reached directly and wrong behind a proxy
+# that strips a path prefix.
+PUBLIC_SCRIPT_URL = os.environ.get("PUBLIC_SCRIPT_URL", "").strip()
+
 # Only one sync may run at a time: the background loop and every GET /sync
 # request (ThreadingHTTPServer serves each connection on its own thread) would
 # otherwise interleave their writes to resolved.json.
@@ -183,6 +199,37 @@ def musicbrainz_albums(mbid: str) -> set[str]:
         data = json.load(resp)
     return {norm_title(g["title"]) for g in data.get("release-groups", [])
             if g.get("primary-type") == "Album" and g.get("title")}
+
+
+_USERSCRIPT_CACHE: dict = {"body": "", "fetched": 0.0, "version": ""}
+
+
+def userscript(public_url: str) -> str:
+    """The panel userscript, mirrored from its repository.
+
+    @updateURL and @downloadURL are rewritten to point back here. Tampermonkey
+    re-checks whatever those lines say, so leaving them pointing at GitHub would
+    mean the install updates from an address the browser may not reach — which
+    is the whole reason for serving it at all.
+    """
+    age = time.monotonic() - _USERSCRIPT_CACHE["fetched"]
+    if not _USERSCRIPT_CACHE["body"] or age > USERSCRIPT_TTL:
+        req = urllib.request.Request(USERSCRIPT_SOURCE, headers={"User-Agent": MB_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8")
+        found = re.search(r"@version\s+(\S+)", body)
+        version = found.group(1) if found else "?"
+        if version != _USERSCRIPT_CACHE["version"]:
+            log.info("userscript mirrored: %s -> %s",
+                     _USERSCRIPT_CACHE["version"] or "(none)", version)
+        _USERSCRIPT_CACHE.update(body=body, fetched=time.monotonic(), version=version)
+
+    return re.sub(
+        r"^(//\s*@(?:update|download)URL\s+)\S+$",
+        lambda m: m.group(1) + public_url,
+        _USERSCRIPT_CACHE["body"],
+        flags=re.MULTILINE,
+    )
 
 
 _DISCOGS_LAST = [0.0]
@@ -897,6 +944,22 @@ class Handler(BaseHTTPRequestHandler):
         except FETCH_ERRORS as exc:
             self._respond({"error": f"{type(exc).__name__}: {exc}"}, 502)
 
+    def _userscript(self) -> None:
+        # Tampermonkey follows @updateURL exactly, so it must be the address the
+        # browser used to get here, not the one the container knows itself by.
+        if PUBLIC_SCRIPT_URL:
+            public = PUBLIC_SCRIPT_URL
+        else:
+            scheme = self.headers.get("X-Forwarded-Proto") or "http"
+            host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost"
+            public = f"{scheme}://{host}{self.path}"
+        try:
+            body = userscript(public).encode()
+        except FETCH_ERRORS as exc:
+            self._respond({"error": f"could not mirror the userscript: {exc}"}, 502)
+            return
+        self._send(body, "application/javascript; charset=utf-8")
+
     def _panel(self) -> None:
         try:
             with open(PANEL_PATH, "rb") as fh:
@@ -945,6 +1008,8 @@ class Handler(BaseHTTPRequestHandler):
             self._missing(urllib.parse.parse_qs(parsed.query))
         elif path == "/panel.user.js":
             self._panel()
+        elif path in ("/userscript.js", "/navidrome-missing-albums.user.js"):
+            self._userscript()
         else:
             self._respond({"error": "not found"}, 404)
 
