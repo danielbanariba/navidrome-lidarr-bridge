@@ -263,7 +263,9 @@ def discogs_discography(artist_id: int) -> list[dict]:
         # earliest year, which is the one a discography should show.
         prev = out.get(key)
         if prev is None or (year and (not prev["year"] or year < prev["year"])):
-            out[key] = {"title": title, "year": year}
+            # The listing already carries a thumbnail per release, so cover art
+            # costs nothing beyond this one request.
+            out[key] = {"title": title, "year": year, "cover": rel.get("thumb") or ""}
     return sorted(out.values(), key=lambda a: a["year"] or "9999")
 
 
@@ -467,10 +469,17 @@ def missing_albums(nd_artist_id: str) -> dict:
         extra = []
     for album in extra:
         key = norm_title(album["title"])
-        if key in missing or is_owned(album["title"]):
+        if is_owned(album["title"]):
+            continue
+        if key in missing:
+            # Cover Art Archive only has what somebody uploaded, and for an
+            # obscure pressing that is often nothing. Discogs came with a
+            # thumbnail already, so keep it as the fallback.
+            missing[key].setdefault("cover", album.get("cover") or "")
             continue
         missing[key] = {"id": None, "title": album["title"], "year": album["year"],
-                        "type": "Album", "requestable": False, "source": "discogs"}
+                        "type": "Album", "requestable": False, "source": "discogs",
+                        "cover": album.get("cover") or ""}
 
     missing = sorted(missing.values(), key=lambda a: a["year"] or "9999")
     return {"artist": name, "monitored": True, "owned": len(owned),
