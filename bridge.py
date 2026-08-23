@@ -343,9 +343,27 @@ def album_id_for_mbid(mbid: str) -> int | None:
     return int(found[0]["id"]) if found else None
 
 
+def ensure_monitored(kind: str, item_id: int, tries: int = 6) -> bool:
+    """Set monitored on an artist or album, and confirm it actually stuck.
+
+    Lidarr answers 202 to a write it has merely accepted. Right after an artist
+    is imported it is also refreshing that artist, and a refresh landing after
+    the write clears the flag again — so the write has to be read back rather
+    than trusted. Backing off between attempts lets the refresh finish.
+    """
+    path = f"/api/v1/{kind}/{item_id}"
+    for attempt in range(tries):
+        item = lidarr_get(path)
+        if item.get("monitored"):
+            return True
+        item["monitored"] = True
+        _put_json(f"{LIDARR_URL}{path}", item, {"X-Api-Key": LIDARR_API_KEY})
+        time.sleep(1 + attempt)
+    return bool(lidarr_get(path).get("monitored"))
+
+
 def request_album(album_id: int) -> dict:
     """Ask Lidarr to monitor an album and go look for it now."""
-    key = {"X-Api-Key": LIDARR_API_KEY}
     album = lidarr_get(f"/api/v1/album/{album_id}")
 
     # An album will not stay monitored while its artist is not: Lidarr accepts
@@ -353,15 +371,13 @@ def request_album(album_id: int) -> dict:
     # unmonitored — that is what keeps its whole discography out of the queue —
     # so the artist has to be lifted before the one requested album can be.
     artist_id = album.get("artistId") or (album.get("artist") or {}).get("id")
-    if artist_id:
-        artist = lidarr_get(f"/api/v1/artist/{artist_id}")
-        if not artist.get("monitored"):
-            artist["monitored"] = True
-            _put_json(f"{LIDARR_URL}/api/v1/artist/{artist_id}", artist, key)
+    if artist_id and not ensure_monitored("artist", artist_id):
+        raise BridgeError(f"could not keep artist {artist_id} monitored")
 
-    if not album.get("monitored"):
-        album["monitored"] = True
-        _put_json(f"{LIDARR_URL}/api/v1/album/{album_id}", album, key)
+    # Searching an unmonitored album finds releases and grabs none of them, so
+    # a request that could not monitor it has failed, however healthy it looks.
+    if not ensure_monitored("album", album_id):
+        raise BridgeError(f"could not keep album {album_id} monitored")
     _post_json(f"{LIDARR_URL}/api/v1/command",
                {"name": "AlbumSearch", "albumIds": [album_id]},
                {"X-Api-Key": LIDARR_API_KEY})
