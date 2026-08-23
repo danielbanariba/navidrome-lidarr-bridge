@@ -154,6 +154,27 @@ the tile wrapper rather than the cover container, because that container carries
 `grayscale` and reduced `opacity` and children inherit both — the cover is meant
 to look faded, the button is not.
 
+### Discogs decides what the discography is
+
+Lidarr can only ever act on what MusicBrainz knows, because every id it stores
+is a MusicBrainz id. That does not make MusicBrainz the authority on what a band
+released. For one Honduran metal band here, MusicBrainz lists seven albums and
+Discogs lists ten — including the 2017 record already sitting in the library.
+
+So the missing list is Lidarr's catalogue, widened by whatever Discogs adds.
+Anything only Discogs knows is marked `requestable: false`: Lidarr has no id for
+it and cannot fetch it, but a record you did not know existed is worth naming
+even when nothing can go and get it.
+
+Finding the artist on Discogs is the same trick as before, and it works better
+there. Discogs lists 326 artists called "Delirium", so asking by name is
+hopeless — but asking for one of their records is not. A release title that
+returns a single hit has identified the band, because no other band by that name
+put out a record by that title.
+
+Read access needs no OAuth: key and secret go in a header, which also lifts the
+rate limit from 25 requests a minute to 60. Both are optional.
+
 ### Why "missing" is not Lidarr's own count
 
 Lidarr only sees its own root folder. A library organised anywhere else reads

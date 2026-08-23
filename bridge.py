@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import unicodedata
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -52,6 +53,14 @@ MB_MIN_INTERVAL = float(os.environ.get("MB_MIN_INTERVAL", "1.1"))
 MB_USER_AGENT = os.environ.get(
     "MB_USER_AGENT",
     "navidrome-lidarr-bridge/1.0 (+https://github.com/danielbanariba/navidrome-lidarr-bridge)")
+# Discogs carries releases MusicBrainz has never heard of, so it is the better
+# source for "what did this band actually put out". Read access needs no OAuth:
+# key and secret go straight in a header, and doing so lifts the rate limit from
+# 25 requests a minute to 60. Both empty still works, just slower.
+DISCOGS_KEY = os.environ.get("DISCOGS_KEY", "").strip()
+DISCOGS_SECRET = os.environ.get("DISCOGS_SECRET", "").strip()
+DISCOGS_MIN_INTERVAL = float(os.environ.get(
+    "DISCOGS_MIN_INTERVAL", "1.1" if DISCOGS_KEY and DISCOGS_SECRET else "2.5"))
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", "900"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8687"))
 STATE_DIR = os.environ.get("STATE_DIR", "/state")
@@ -176,6 +185,88 @@ def musicbrainz_albums(mbid: str) -> set[str]:
             if g.get("primary-type") == "Album" and g.get("title")}
 
 
+_DISCOGS_LAST = [0.0]
+
+
+def discogs_get(path: str) -> dict:
+    """Call Discogs, throttled, identifying ourselves as it requires."""
+    wait = DISCOGS_MIN_INTERVAL - (time.monotonic() - _DISCOGS_LAST[0])
+    if wait > 0:
+        time.sleep(wait)
+    _DISCOGS_LAST[0] = time.monotonic()
+    headers = {"User-Agent": MB_USER_AGENT}
+    if DISCOGS_KEY and DISCOGS_SECRET:
+        headers["Authorization"] = f"Discogs key={DISCOGS_KEY}, secret={DISCOGS_SECRET}"
+    req = urllib.request.Request("https://api.discogs.com" + path, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def discogs_artist_id(name: str, owned: set[str]) -> int | None:
+    """Find the Discogs artist by searching for a record it is known to have.
+
+    Discogs lists 326 artists called "Delirium", so asking it by name is
+    hopeless. Asking for one of their records is not: a release title that
+    returns a single hit has identified the artist, because no other band by
+    that name released a record by that title.
+
+    Titles are tried until one is that specific. A title shared with other
+    bands simply returns several hits and is skipped.
+    """
+    for title in sorted(owned):
+        if not title:
+            continue
+        query = urllib.parse.urlencode({
+            "type": "release", "artist": name, "release_title": title, "per_page": 5,
+        })
+        try:
+            found = discogs_get(f"/database/search?{query}").get("results") or []
+        except FETCH_ERRORS as exc:
+            log.warning("discogs search failed for %r / %r: %s", name, title, exc)
+            continue
+        if len(found) != 1:
+            continue
+        try:
+            release = discogs_get(f"/releases/{found[0]['id']}")
+        except FETCH_ERRORS as exc:
+            log.warning("discogs release %s unreadable: %s", found[0]["id"], exc)
+            continue
+        artists = release.get("artists") or []
+        if artists:
+            log.info("discogs: %r identified as %r via %r",
+                     name, artists[0].get("name"), title)
+            return int(artists[0]["id"])
+    return None
+
+
+def discogs_discography(artist_id: int) -> list[dict]:
+    """Albums Discogs credits to this artist, newest title kept once.
+
+    Only main-artist entries count: an appearance on somebody else's record is
+    not part of a discography. Compilations are dropped for the same reason a
+    "Greatest Hits" is not a missing album.
+    """
+    data = discogs_get(f"/artists/{artist_id}/releases?per_page=100&sort=year")
+    out: dict[str, dict] = {}
+    for rel in data.get("releases", []):
+        if rel.get("role") != "Main":
+            continue
+        fmt = str(rel.get("format") or "")
+        if "Comp" in fmt or "Single" in fmt:
+            continue
+        title = (rel.get("title") or "").strip()
+        if not title:
+            continue
+        key = norm_title(title)
+        year = str(rel.get("year") or "")
+        # The same album appears as a master and again per pressing; keep the
+        # earliest year, which is the one a discography should show.
+        prev = out.get(key)
+        if prev is None or (year and (not prev["year"] or year < prev["year"])):
+            out[key] = {"title": title, "year": year}
+    return sorted(out.values(), key=lambda a: a["year"] or "9999")
+
+
 def disambiguate(candidates: list[dict], owned: set[str]) -> tuple[dict | None, list[dict]]:
     """Pick the artist whose discography contains the albums already owned.
 
@@ -294,13 +385,19 @@ _EDITION = re.compile(
 
 
 def norm_title(title: str) -> str:
-    """Compare album titles across two catalogues that disagree on punctuation.
+    """Compare album titles across catalogues that disagree on how to spell them.
 
-    Navidrome reports whatever the files are tagged with; Lidarr reports
-    MusicBrainz. They differ in case, in apostrophes (' vs U+2019), and in
-    parenthesised edition notes, so strip all three down to bare words.
+    Navidrome reports whatever the files are tagged with, Lidarr reports
+    MusicBrainz, Discogs transcribes the sleeve. They differ in case, in
+    apostrophes (' vs U+2019), in parenthesised edition notes, and in accents —
+    Discogs has "Xibalbá" where MusicBrainz has "Xibalba".
+
+    Accents are folded rather than stripped: dropping the character outright
+    would turn "Xibalbá" into "xibalb a" and stop it matching at all.
     """
-    text = re.sub(r"\(.*?\)|\[.*?\]", " ", title.lower())
+    folded = unicodedata.normalize("NFKD", title.lower())
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    text = re.sub(r"\(.*?\)|\[.*?\]", " ", folded)
     text = _EDITION.sub(" ", text)
     return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
 
@@ -343,14 +440,36 @@ def missing_albums(nd_artist_id: str) -> dict:
         return {"artist": name, "monitored": False, "owned": len(owned), "missing": [],
                 "hint": "starred, but Lidarr has not imported it yet"}
 
-    missing = [
-        {"id": album["id"], "title": album["title"],
-         "year": (album.get("releaseDate") or "")[:4],
-         "type": album.get("albumType", "")}
-        for album in lidarr_get(f"/api/v1/album?artistId={match['id']}")
-        if not is_owned(album["title"])
-    ]
-    missing.sort(key=lambda a: a["year"] or "9999")
+    # Lidarr's catalogue is what can actually be requested, because everything
+    # it does is keyed on MusicBrainz ids.
+    requestable = {}
+    for album in lidarr_get(f"/api/v1/album?artistId={match['id']}"):
+        if not is_owned(album["title"]):
+            requestable[norm_title(album["title"])] = {
+                "id": album["id"], "title": album["title"],
+                "year": (album.get("releaseDate") or "")[:4],
+                "type": album.get("albumType", ""), "requestable": True,
+            }
+    missing = dict(requestable)
+
+    # Discogs lists records MusicBrainz has never heard of — this band's 2017
+    # album among them — so it decides what the discography really is. What it
+    # adds cannot be requested, since Lidarr has no id for it, but a record you
+    # did not know existed is worth naming even when nothing can fetch it.
+    try:
+        discogs_id = discogs_artist_id(name, owned)
+        extra = discogs_discography(discogs_id) if discogs_id else []
+    except FETCH_ERRORS as exc:
+        log.warning("discogs lookup failed for %r: %s", name, exc)
+        extra = []
+    for album in extra:
+        key = norm_title(album["title"])
+        if key in missing or is_owned(album["title"]):
+            continue
+        missing[key] = {"id": None, "title": album["title"], "year": album["year"],
+                        "type": "Album", "requestable": False, "source": "discogs"}
+
+    missing = sorted(missing.values(), key=lambda a: a["year"] or "9999")
     return {"artist": name, "monitored": True, "owned": len(owned),
             "lidarrArtistId": match["id"], "missing": missing}
 
