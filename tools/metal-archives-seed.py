@@ -188,7 +188,8 @@ def release_detail(url: str) -> dict:
             "label": field("Label"), "format": field("Format"), "tracks": tracks}
 
 
-def identify(name: str, owned: list[dict], forced: str | None) -> dict | None:
+def identify(name: str, owned: list[dict], forced: str | None,
+             limit: int = 20) -> dict | None:
     """Which of the bands by this name is the one on the shelf.
 
     Sixty-seven are called "Delirium". Asking by name alone answers nothing, and
@@ -208,15 +209,19 @@ def identify(name: str, owned: list[dict], forced: str | None) -> dict | None:
     mine = {norm(a["title"]) for a in owned if a["title"]}
     print(f"  {len(candidates)} bands called {name!r}")
     scored = []
-    for band in candidates[:12]:
+    for band in candidates[:limit]:
         titles = {norm(r["title"]) for r in discography(band["id"])}
         overlap = {t for t in titles
                    if any(m == t or m.startswith(t + " ") for m in mine)}
         scored.append({"band": band, "overlap": overlap, "total": len(titles)})
         print(f"    {band['country'][:18]:<20} {band['genre'][:26]:<28} "
               f"{len(overlap)} of yours")
-    if len(candidates) > 12:
-        print(f"    ({len(candidates) - 12} more not checked)")
+    if len(candidates) > limit:
+        # Said out loud rather than dropped quietly: a right answer found among
+        # the first twenty is still an answer chosen from a truncated list, and
+        # a reader deserves to know the search had an edge. --candidates moves it.
+        print(f"    ({len(candidates) - limit} more not checked — "
+              f"raise --candidates if the right one is missing)")
 
     scored.sort(key=lambda s: len(s["overlap"]), reverse=True)
     best = scored[0]
@@ -499,10 +504,11 @@ def band_details(band: dict) -> dict:
     return band
 
 
-def seed_one(nd_artist_id: str, forced: str | None, out_dir: str) -> str | None:
+def seed_one(nd_artist_id: str, forced: str | None, out_dir: str,
+             limit: int = 20) -> str | None:
     name, owned = owned_albums(nd_artist_id)
     print(f"\n  {name} — {len(owned)} albums in the library")
-    band = identify(name, owned, forced)
+    band = identify(name, owned, forced, limit)
     if not band:
         return None
     band = band_details(band)
@@ -553,6 +559,9 @@ def main() -> None:
     ap.add_argument("--band-id", help="Metal Archives band id, to settle it by hand")
     ap.add_argument("--out", default=os.path.expanduser("~"),
                     help="where to write the pages (default: your home directory)")
+    ap.add_argument("--candidates", type=int, default=20,
+                    help="how many same-named bands to weigh (default 20). Each "
+                         "costs one request to somebody else's server.")
     args = ap.parse_args()
     if not args.artist and not args.unresolved:
         ap.error("give --artist, or --unresolved")
@@ -572,7 +581,8 @@ def main() -> None:
             else:
                 print(f"    {name}: no such artist in Navidrome, skipping")
 
-    written = [p for p in (seed_one(nd, forced, args.out) for nd, forced in targets) if p]
+    written = [p for p in (seed_one(nd, forced, args.out, args.candidates)
+                           for nd, forced in targets) if p]
     print(f"\n  {len(written)} page(s) written; open them and press the buttons")
 
 
