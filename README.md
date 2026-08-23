@@ -235,6 +235,48 @@ is synthesised from tags — `Delirium/Abismo/01 - …` for a file that lives fo
 directories deeper under a genre tree — so joining it to the music folder yields
 a path that does not exist.
 
+## When the catalogue has never heard of the band: `tools/metal-archives-seed.py`
+
+Lidarr is keyed entirely on MusicBrainz ids. A band MusicBrainz does not have
+cannot be imported, monitored or requested, and the panel can only say — quite
+correctly — that it knows nothing. For underground metal that is most of the
+shelf. One Honduran black metal band here has three records and a split
+documented in full on Encyclopaedia Metallum, and is absent from both
+MusicBrainz and Discogs.
+
+Reading a third catalogue would not fix that. It would only let the panel name a
+record nothing can go and fetch, which is what `requestable: false` already does
+for anything only Discogs knows. The fix is to put the band in the catalogue the
+pipeline already speaks — once — after which every part of this starts working on
+its own, and the next person looking for that record finds it too.
+
+```
+tools/metal-archives-seed.py --artist <navidrome-artist-id>
+tools/metal-archives-seed.py --unresolved      # every name the bridge gave up on
+```
+
+It gathers what Metal Archives holds, times each track against the file actually
+on disk, and writes a page of MusicBrainz forms with every field filled in.
+Nothing is submitted from here: a person reviews each form and presses the
+button. That is the point — this does the transcription, not the judgement.
+
+`--unresolved` reads the bridge's own `/status`, so the list of names it works on
+is exactly the list of names the library could not answer.
+
+Which band is settled the way it is settled everywhere else here. Sixty-seven
+bands are called "Delirium" on Metal Archives, so the one whose discography
+matches the library wins, a tie is refused, and a name nothing confirms is left
+alone rather than guessed at.
+
+Splits are left out on purpose: they need a credit per track, and a half-seeded
+form is worse than an empty one. So is anything with no track list to copy. Both
+are named on the page rather than silently dropped.
+
+One warning the page repeats, because it is the whole reason this project exists:
+MusicBrainz will offer to match by name, and there is already an unrelated punk
+band called Nihilismo in it. Create the artist first, paste its id, and every
+form credits the right band.
+
 ## Judging a release by what is inside it: `tools/best-release.py`
 
 Lidarr can only act on what a release calls itself. Of ten torrents for one
