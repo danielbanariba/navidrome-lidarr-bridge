@@ -36,11 +36,22 @@ Libraries tagged without MusicBrainz fields therefore need every starred artist
 resolved by name first. The bridge asks Lidarr's own `/api/v1/artist/lookup`,
 so the id it emits is exactly the one Lidarr uses when adding the artist.
 
-## Ambiguity is never guessed
+## Ambiguity is settled by the library, not by a coin toss
 
-A name resolves only when exactly one MusicBrainz artist matches it exactly.
-Six different bands are called "Delirium"; picking the first would silently
-monitor the wrong discography. Unresolved names appear on `/status`:
+Ten different artists are called "Delirium". Picking the first would silently
+monitor the wrong discography, and asking the user to pick is just handing the
+problem back.
+
+But unrelated bands sharing a name do not share a back catalogue. Holding
+`Abismo` and `Los signos del Fauno` identifies exactly one of those ten — the
+Honduran metal band — and nothing else comes close. So when several artists
+match a name, each candidate's discography is fetched from MusicBrainz and
+compared against what the library already holds; the one that overlaps wins.
+
+A tie is not an answer: if two catalogues match equally well, the library cannot
+tell them apart either, and the name is left unresolved. So is a name where
+nothing matches at all. Those appear on `/status` with every candidate and what
+each had in common, so the pin is an informed one:
 
 ```json
 {

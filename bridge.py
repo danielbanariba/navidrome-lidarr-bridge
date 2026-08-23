@@ -10,8 +10,10 @@ Navidrome libraries frequently carry no MusicBrainz tags at all, so artist
 names are resolved to ids through Lidarr's own /artist/lookup endpoint, which
 already speaks to the metadata server Lidarr will use when adding the artist.
 
-Ambiguous names (several MusicBrainz artists share it) are never guessed:
-they are reported on /status so a human can pin them in overrides.json.
+A name several artists share is settled by the library itself: unrelated bands
+sharing a name do not share a back catalogue, so the candidate whose discography
+contains the albums already owned is the right one. Only a name that nothing
+distinguishes is reported on /status for a human to pin in overrides.json.
 """
 
 from __future__ import annotations
@@ -44,6 +46,12 @@ LIDARR_API_KEY = os.environ.get("LIDARR_API_KEY", "")
 LIDARR_IMPORTLIST_ID = os.environ.get("LIDARR_IMPORTLIST_ID", "").strip()
 # How long to wait for Lidarr to list an album after its artist is imported.
 IMPORT_WAIT_SECONDS = int(os.environ.get("IMPORT_WAIT_SECONDS", "45"))
+# MusicBrainz asks for no more than one request a second, and identifies
+# callers by User-Agent. Only used to break a tie between same-named artists.
+MB_MIN_INTERVAL = float(os.environ.get("MB_MIN_INTERVAL", "1.1"))
+MB_USER_AGENT = os.environ.get(
+    "MB_USER_AGENT",
+    "navidrome-lidarr-bridge/1.0 (+https://github.com/danielbanariba/navidrome-lidarr-bridge)")
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", "900"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8687"))
 STATE_DIR = os.environ.get("STATE_DIR", "/state")
@@ -119,18 +127,90 @@ def subsonic(endpoint: str, **params) -> dict:
     return body
 
 
-def starred_artists() -> dict[str, str | None]:
-    """Starred artist names -> the MusicBrainz id Navidrome already knows, if any."""
+def starred_artists() -> dict[str, dict]:
+    """Starred artist names -> {"id": Navidrome id, "mbid": tagged id or None}.
+
+    The Navidrome id is carried along because disambiguating a shared name needs
+    to know which albums the library actually holds for it.
+    """
     body = subsonic("getStarred2")
-    out: dict[str, str | None] = {}
+    out: dict[str, dict] = {}
     for artist in body.get("starred2", {}).get("artist", []) or []:
         name = (artist.get("name") or "").strip()
         if not name:
             continue
         tagged = artist.get("musicBrainzId")
+        entry = out.setdefault(name, {"id": artist.get("id"), "mbid": None})
         # A duplicate name must not erase an id seen on an earlier entry.
-        out[name] = tagged.strip().lower() if _is_mbid(tagged) else out.get(name)
+        if _is_mbid(tagged):
+            entry["mbid"] = tagged.strip().lower()
     return out
+
+
+def owned_titles(nd_artist_id: str) -> set[str]:
+    """Normalised album titles the library holds for a Navidrome artist."""
+    artist = subsonic("getArtist", id=nd_artist_id).get("artist", {})
+    return {norm_title(a["name"]) for a in artist.get("album", []) if a.get("name")}
+
+
+_MB_LAST = [0.0]
+
+
+def musicbrainz_albums(mbid: str) -> set[str]:
+    """Normalised studio album titles MusicBrainz lists for an artist.
+
+    Called only to break a tie between artists sharing a name, so the one
+    request per second MusicBrainz asks for costs nothing in the common case.
+    """
+    wait = MB_MIN_INTERVAL - (time.monotonic() - _MB_LAST[0])
+    if wait > 0:
+        time.sleep(wait)
+    _MB_LAST[0] = time.monotonic()
+    url = ("https://musicbrainz.org/ws/2/release-group?"
+           + urllib.parse.urlencode({"artist": mbid, "type": "album",
+                                     "limit": "100", "fmt": "json"}))
+    req = urllib.request.Request(url, headers={"User-Agent": MB_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
+    return {norm_title(g["title"]) for g in data.get("release-groups", [])
+            if g.get("primary-type") == "Album" and g.get("title")}
+
+
+def disambiguate(candidates: list[dict], owned: set[str]) -> tuple[dict | None, list[dict]]:
+    """Pick the artist whose discography contains the albums already owned.
+
+    Several unrelated bands share a name, but they do not share a back
+    catalogue. Holding "Abismo" and "Los signos del Fauno" identifies exactly
+    one of the ten artists called Delirium, and no human has to be asked.
+
+    Returns the winner and, either way, every candidate with its overlap so an
+    unresolved name can show its working.
+    """
+    scored = []
+    for cand in candidates:
+        try:
+            albums = musicbrainz_albums(cand["foreignArtistId"])
+        except FETCH_ERRORS as exc:
+            log.warning("discography lookup failed for %s: %s", cand["foreignArtistId"], exc)
+            albums = set()
+        scored.append({"candidate": cand, "overlap": owned & albums, "total": len(albums)})
+    scored.sort(key=lambda s: len(s["overlap"]), reverse=True)
+
+    report = [
+        {"mbid": s["candidate"]["foreignArtistId"],
+         "disambiguation": s["candidate"].get("disambiguation") or "",
+         "albums_in_common": sorted(s["overlap"])}
+        for s in scored
+    ]
+    best = scored[0] if scored else None
+    if not best or not best["overlap"]:
+        return None, report
+    # A tie is not an answer: two catalogues matching equally well means the
+    # library cannot tell them apart either.
+    runner_up = scored[1]["overlap"] if len(scored) > 1 else set()
+    if len(best["overlap"]) == len(runner_up):
+        return None, report
+    return best["candidate"], report
 
 
 def lidarr_lookup(name: str) -> list[dict]:
@@ -384,11 +464,14 @@ def request_album(album_id: int) -> dict:
     return {"requested": album.get("title"), "albumId": album_id}
 
 
-def resolve(name: str) -> tuple[str | None, str, list[dict]]:
+def resolve(name: str, nd_artist_id: str | None = None) -> tuple[str | None, str, list[dict]]:
     """Map an artist name to a MusicBrainz id.
 
-    Returns (mbid, reason, candidates). A name is only resolved when exactly one
-    MusicBrainz artist matches it exactly; anything else is left for a human.
+    Returns (mbid, reason, candidates). One exact match resolves outright. When
+    several artists share the name, the library itself decides: the one whose
+    catalogue contains the albums already owned is the right one. Only a name
+    that nothing distinguishes is left for a human.
+
     A failed lookup must never abort the caller's whole sync, so every network
     and decoding error is turned into an unresolved result.
     """
@@ -405,12 +488,27 @@ def resolve(name: str) -> tuple[str | None, str, list[dict]]:
     ]
     if not exact:
         return None, "not found in MusicBrainz", []
-    if len(exact) > 1:
+    if len(exact) == 1:
+        return exact[0]["foreignArtistId"], "ok", []
+
+    if not nd_artist_id:
         return None, f"ambiguous: {len(exact)} artists share this name", [
             {"mbid": a["foreignArtistId"], "disambiguation": a.get("disambiguation") or ""}
             for a in exact
         ]
-    return exact[0]["foreignArtistId"], "ok", []
+
+    try:
+        owned = owned_titles(nd_artist_id)
+    except FETCH_ERRORS as exc:
+        return None, f"ambiguous, and the library could not be read: {exc}", []
+
+    winner, report = disambiguate(exact, owned)
+    if winner is None:
+        return None, (f"ambiguous: {len(exact)} artists share this name, and none "
+                      f"of their catalogues is a better match for what is owned"), report
+    log.info("%r disambiguated by discography -> %s (%s)",
+             name, winner["foreignArtistId"], winner.get("disambiguation") or "no note")
+    return winner["foreignArtistId"], "ok", []
 
 
 def _load(path: str, default):
@@ -513,8 +611,9 @@ def _sync_locked() -> None:
                 "candidates": [],
             }
             continue
-        if starred[name]:
-            cache[name] = starred[name]  # Navidrome is tagged: a free, exact answer
+        tagged = starred[name].get("mbid")
+        if tagged:
+            cache[name] = tagged  # Navidrome is tagged: a free, exact answer
             continue
         if name in cache:
             continue
@@ -528,7 +627,7 @@ def _sync_locked() -> None:
             }
             continue
 
-        mbid, reason, candidates = resolve(name)
+        mbid, reason, candidates = resolve(name, starred[name].get("id"))
         if mbid:
             cache[name] = mbid
             _BACKOFF.pop(name, None)
