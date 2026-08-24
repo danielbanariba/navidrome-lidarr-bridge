@@ -306,6 +306,24 @@ finds nothing better says so instead of fetching a copy that changes nothing.
 Losers are deleted and the winner is handed to Lidarr, which imports it the
 ordinary way. Only torrents carrying this tool's own tag are ever deleted.
 
+### A torrent is not always one album
+
+Discographies and box sets are common, and the album wanted is often inside one.
+Searching for "artist album" never finds those; searching for the artist alone
+finds them and drowns in everything else. So both searches run, and the file
+list decides: a release that does not contain the album is not a candidate,
+whatever it is called.
+
+When the album is inside a larger torrent, only its files are fetched — the rest
+are set to skip before the download starts, so a twenty-gigabyte discography
+costs one album's worth of disk. The audit then reads that album's own folder
+rather than the box around it, which would otherwise average this record
+together with every other one in the set.
+
+That distinction matters in the other direction too. An unreadable file list
+says nothing and leaves a release in the running; a readable one that does not
+list the album is a real answer, and rules it out.
+
 ### Why the spectrum is measured as a cliff
 
 A first attempt compared each track's high frequencies against its loudest bin.

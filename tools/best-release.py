@@ -42,6 +42,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -67,6 +68,9 @@ PATH_TO = os.environ.get("QBIT_PATH_TO", "/mnt/Entretenimiento")
 # that carry it. A bug here would delete somebody's library, so the blast radius
 # is fixed in one place rather than argued about at each call site.
 TAG = "ndlb-audition"
+# Metadata probes live under their own tag so a failed probe can be cleaned up
+# without ever looking at what the audition itself is holding.
+PROBE_TAG = "ndlb-probe"
 LIDARR_CATEGORY = os.environ.get("QBIT_LIDARR_CATEGORY", "lidarr")
 
 LOSSLESS_EXT = {"flac", "ape", "wv", "alac", "m4a", "aiff", "wav"}
@@ -250,8 +254,12 @@ def magnet_hash(url: str) -> str | None:
         return None
 
 
-def torrent_extensions(raw: bytes | None) -> dict[str, int] | None:
-    """What file types a torrent holds, read from its metadata alone."""
+def torrent_files(raw: bytes | None) -> list[str] | None:
+    """Every path a torrent holds, in the client's own file order.
+
+    Order matters: qBittorrent addresses files by index into this same list, so
+    what is read here is what can later be told to skip.
+    """
     if raw is None:
         return None
     try:
@@ -259,15 +267,123 @@ def torrent_extensions(raw: bytes | None) -> dict[str, int] | None:
         info = meta[b"info"]
     except Exception:
         return None
-    if b"files" in info:
-        names = [b"/".join(f[b"path"]).decode("utf8", "replace") for f in info[b"files"]]
-    else:
-        names = [info[b"name"].decode("utf8", "replace")]
+    root = info[b"name"].decode("utf8", "replace")
+    if b"files" not in info:
+        return [root]
+    return [root + "/" + "/".join(part.decode("utf8", "replace") for part in f[b"path"])
+            for f in info[b"files"]]
+
+
+def extensions(names: list[str] | None) -> dict[str, int] | None:
+    if names is None:
+        return None
     counts: dict[str, int] = {}
     for name in names:
         ext = name.rsplit(".", 1)[-1].lower() if "." in name else "?"
         counts[ext] = counts.get(ext, 0) + 1
     return counts
+
+
+def wanted_indexes(names: list[str] | None, title: str) -> list[int] | None:
+    """Which files in a torrent belong to the album that was asked for.
+
+    A torrent is not always one album. Discographies and box sets are common,
+    and the album wanted is often inside one — searching by "artist album" and
+    reading only the extensions missed every one of them. The file list already
+    in hand says whether it is in there.
+
+    Returns None when the torrent is a single album and every audio file counts,
+    an empty list when the album is nowhere in it, and otherwise the indexes to
+    keep — so a twenty-gigabyte discography costs one album's worth of disk.
+    """
+    if not names:
+        return None
+    key = norm(title)
+    if not key:
+        return None
+    audio = [i for i, name in enumerate(names)
+             if name.rsplit(".", 1)[-1].lower() in LOSSLESS_EXT | LOSSY_EXT]
+    if not audio:
+        return []
+
+    # A directory named for the album is the strongest signal, and it takes the
+    # whole directory with it — including tracks whose own names say nothing.
+    keep = set()
+    for i in audio:
+        parts = names[i].split("/")
+        if any(key in norm(part) for part in parts[:-1]):
+            keep.add(i)
+    if not keep:
+        # No folder said so; a run of files might still name it.
+        keep = {i for i in audio if key in norm(names[i])}
+    if not keep:
+        return []
+    # Everything matched: an ordinary single-album torrent, nothing to skip.
+    return None if len(keep) == len(audio) else sorted(keep)
+
+
+def probe_magnets(candidates: list[dict], title: str, limit: int) -> None:
+    """Read a magnet's file list by fetching its metadata and nothing else.
+
+    Reading the .torrent directly is free, but these indexers do not serve one:
+    every link here answers with a redirect to a magnet, and a magnet carries no
+    file list at all. Of 184 releases for one album, not a single file list was
+    readable — so the check that was supposed to rule out torrents lacking the
+    album ruled out nothing.
+
+    A magnet's metadata is a few kilobytes and the client will fetch it on its
+    own if the torrent is added stopped. That is what happens here: added
+    stopped, metadata only, file list read, torrent removed. No album content
+    moves, and afterwards every candidate can be judged on what it actually
+    contains rather than on its name.
+    """
+    need = [c for c in candidates if c.get("_files") is None and c.get("_hash")][:limit]
+    if not need:
+        return
+    print(f"\n  reading the contents of {len(need)} magnets (metadata only)")
+    qbt("/torrents/createTags", {"tags": PROBE_TAG})
+    fields = {"category": PROBE_TAG, "tags": PROBE_TAG,
+              "savepath": f"{PATH_FROM}/torrents/{PROBE_TAG}",
+              "paused": "true", "stopped": "true"}
+    added = []
+    for cand in need:
+        try:
+            qbt_add(cand.get("_raw"), cand.get("_link") or "", fields)
+            added.append(cand)
+        except Exception:
+            continue
+
+    deadline = time.time() + 180
+    pending = {c["_hash"]: c for c in added}
+    while pending and time.time() < deadline:
+        time.sleep(6)
+        for torrent in qbt(f"/torrents/info?tag={PROBE_TAG}"):
+            cand = pending.get(torrent["hash"].lower())
+            if cand is None:
+                continue
+            try:
+                listing = qbt(f"/torrents/files?hash={torrent['hash']}")
+            except Exception:
+                continue
+            if not isinstance(listing, list) or not listing:
+                continue
+            names = [f["name"] for f in sorted(listing, key=lambda f: f.get("index", 0))]
+            cand["_files"] = names
+            cand["_ext"] = extensions(names)
+            cand["_kind"] = classify(cand["_ext"])
+            cand["_want"] = wanted_indexes(names, title)
+            pending.pop(torrent["hash"].lower(), None)
+        left = int(deadline - time.time())
+        print(f"\r  {len(added) - len(pending)}/{len(added)} read, {left}s left    ",
+              end="", flush=True)
+    print("\r" + " " * 46 + "\r", end="")
+    if pending:
+        print(f"  {len(pending)} never produced metadata; judged by name alone")
+
+    # Nothing was downloaded but the entries, so this removes only the probes.
+    ours = [t["hash"] for t in qbt(f"/torrents/info?tag={PROBE_TAG}")]
+    if ours:
+        qbt("/torrents/delete", {"hashes": "|".join(ours), "deleteFiles": "true"})
 
 
 def classify(counts: dict[str, int] | None) -> str:
@@ -281,6 +397,14 @@ def classify(counts: dict[str, int] | None) -> str:
 
 
 # ── looking inside the audio ──────────────────────────────────────────────
+
+def norm(title: str) -> str:
+    """Fold a title the way the rest of this project folds one."""
+    folded = unicodedata.normalize("NFKD", (title or "").lower())
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    stripped = re.sub(r"\(.*?\)|\[.*?\]", " ", folded)
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", stripped).split())
+
 
 def probe(path: str) -> dict | None:
     out = subprocess.run(
@@ -586,13 +710,28 @@ def find_album(args) -> dict:
             "artist": match["artistName"], "mbid": album.get("foreignAlbumId")}
 
 
-def shortlist(album: dict, want: int, min_seeders: int) -> list[dict]:
-    term = f"{album['artist']} {album['title']}"
-    print(f"  searching {term!r}")
-    results = prowlarr_search(term)
-    print(f"  {len(results)} results\n")
+def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list[dict]:
+    """Candidates worth auditioning, chosen by what they contain.
 
-    seen, candidates, dead = set(), [], 0
+    Two searches, because a torrent is not always one album. The album is often
+    inside a discography or a box set, and asking only for "artist album" never
+    finds those — while asking for the artist alone finds them and drowns in
+    everything else. The file list settles it: a release that does not contain
+    the album is not a candidate, whatever it is called.
+    """
+    terms = [f"{album['artist']} {album['title']}", album["artist"]]
+    results, seen_guid = [], set()
+    for term in terms:
+        print(f"  searching {term!r}")
+        for rel in prowlarr_search(term):
+            guid = rel.get("guid") or rel.get("downloadUrl") or rel.get("title")
+            if guid in seen_guid:
+                continue
+            seen_guid.add(guid)
+            results.append(rel)
+    print(f"  {len(results)} results between them\n")
+
+    seen, candidates, dead, missing = set(), [], 0, 0
     for rel in sorted(results, key=lambda r: -(r.get("seeders") or 0)):
         title = rel.get("title") or ""
         key = re.sub(r"[^a-z0-9]+", "", title.lower())
@@ -605,25 +744,52 @@ def shortlist(album: dict, want: int, min_seeders: int) -> list[dict]:
             dead += 1
             continue
         raw, link = fetch_release(rel.get("downloadUrl") or rel.get("guid") or "")
-        counts = torrent_extensions(raw)
-        rel["_kind"], rel["_ext"] = classify(counts), counts
+        names = torrent_files(raw)
         rel["_raw"], rel["_link"] = raw, link
         rel["_hash"] = infohash(raw) if raw else magnet_hash(link)
-        kind = rel["_kind"]
+        rel["_files"] = names
+        rel["_ext"] = extensions(names)
+        rel["_kind"] = classify(rel["_ext"])
+        rel["_want"] = wanted_indexes(names, album["title"])
         candidates.append(rel)
-        shown = counts if counts else "file list unavailable"
-        print(f"    {kind:<9} seed={rel.get('seeders', 0):<4} {title[:58]}")
-        print(f"              {shown}")
+
+    # The name is a weak signal but it is the only one available before the
+    # metadata arrives, so it decides which magnets are worth opening.
+    candidates.sort(key=lambda r: -(r.get("seeders") or 0))
+    probe_magnets(candidates, album["title"], probe)
+
+    kept = []
+    for rel in candidates:
+        # An empty list means the file list was readable and the album is not in
+        # there. That is a real answer and it disqualifies the release — unlike
+        # an unreadable list, which says nothing either way and leaves it in.
+        if rel.get("_want") == []:
+            missing += 1
+            continue
+        kept.append(rel)
 
     # Lossless first, then the ones that would not say. A release proven lossy is
-    # only worth downloading when nothing better is on offer.
+    # only worth downloading when nothing better is on offer. Among equals a
+    # single-album torrent beats a discography: less to fetch and less to sort.
     rank = {"lossless": 0, "unknown": 1, "lossy": 2, "empty": 3}
-    candidates.sort(key=lambda r: (rank[r["_kind"]], -(r.get("seeders") or 0)))
-    picked = [c for c in candidates if c["_kind"] != "empty"][:want]
-    dropped = len(candidates) - len(picked)
-    if dropped or dead:
-        print(f"\n  auditioning {len(picked)}; {dropped} ranked out, "
-              f"{dead} with fewer than {min_seeders} seeders")
+    kept.sort(key=lambda r: (rank[r["_kind"]], bool(r.get("_want")),
+                             -(r.get("seeders") or 0)))
+    picked = [c for c in kept if c["_kind"] != "empty"][:want]
+
+    print(f"\n  auditioning {len(picked)} of {len(candidates)}: "
+          f"{dead} with fewer than {min_seeders} seeders, "
+          f"{missing} that do not contain this album, "
+          f"{max(0, len(kept) - len(picked))} ranked out\n")
+    for rel in picked:
+        note = ""
+        if rel.get("_want"):
+            note = (f"  <- {len(rel['_want'])} of {len(rel['_files'])} files are "
+                    f"this album; the rest will be skipped")
+        elif rel.get("_files"):
+            note = f"  <- {len(rel['_files'])} files, all of them this album"
+        print(f"    {rel['_kind']:<9} seed={rel.get('seeders', 0):<4} "
+              f"{(rel.get('title') or '')[:56]}")
+        print(f"              {rel['_ext'] or 'contents unknown'}{note}")
     return picked
 
 
@@ -676,6 +842,9 @@ def main() -> None:
     ap.add_argument("--download", action="store_true",
                     help="actually download; without it only the free file-list pass runs")
     ap.add_argument("--wait", type=int, default=45, help="minutes to wait (default 45)")
+    ap.add_argument("--probe", type=int, default=14,
+                    help="how many magnets to open for their file list (default 14). "
+                         "Metadata only — no album content is fetched.")
     ap.add_argument("--min-seeders", type=int, default=1,
                     help="ignore releases with fewer seeders than this (default 1)")
     ap.add_argument("--keep-losers", action="store_true",
@@ -691,7 +860,7 @@ def main() -> None:
     album = find_album(args)
     print(f"\n  {album['artist']} — {album['title']}\n")
 
-    picked = shortlist(album, args.candidates, args.min_seeders)
+    picked = shortlist(album, args.candidates, args.min_seeders, args.probe)
     if not picked:
         sys.exit("  nothing worth auditioning")
 
@@ -701,14 +870,20 @@ def main() -> None:
 
     print()
     qbt("/torrents/createTags", {"tags": TAG})
+    # Added stopped, so a discography can be told which files to skip before it
+    # starts fetching all of them. Both spellings are sent: the client renamed
+    # "paused" to "stopped", and it ignores the one it does not know.
     fields = {"category": TAG, "tags": TAG,
-              "savepath": f"{PATH_FROM}/torrents/{TAG}", "paused": "false"}
+              "savepath": f"{PATH_FROM}/torrents/{TAG}",
+              "paused": "true", "stopped": "true"}
     # Added one at a time so the client's own list says which torrent each
     # release became. An indexer link can be a torrent, a redirect to a magnet,
     # or a page that refuses to be read at all, and only some of those yield an
     # id up front — but every one of them lands under this tag and nothing else
     # does, so the arrival itself is the identification.
     added: list[str] = []
+    # For a torrent that carried more than this album, the paths worth auditing.
+    wanted: dict[str, list[str]] = {}
     for rel in picked:
         url = rel.get("_link") or rel.get("downloadUrl") or rel.get("guid") or ""
         title = rel.get("title", "")[:52]
@@ -742,11 +917,34 @@ def main() -> None:
             if fresh:
                 arrived = fresh.pop()
                 break
-        if arrived:
-            added.append(arrived)
-            print(f"  added:        {title}")
-        else:
+        if not arrived:
             print(f"  never started: {title}")
+            continue
+        added.append(arrived)
+        keep = rel.get("_want")
+        if keep:
+            names = rel.get("_files") or []
+            skip = [str(i) for i in range(len(names)) if i not in set(keep)]
+            if skip:
+                try:
+                    qbt("/torrents/filePrio",
+                        {"hash": arrived, "id": "|".join(skip), "priority": "0"})
+                    wanted[arrived] = [names[i] for i in keep]
+                    print(f"  added:        {title}")
+                    print(f"                skipping {len(skip)} files that are "
+                          f"not this album")
+                except Exception as exc:
+                    # Better to fetch the whole thing than to fetch nothing.
+                    print(f"  added:        {title} (could not skip files: "
+                          f"{type(exc).__name__}; taking all of it)")
+        else:
+            print(f"  added:        {title}")
+        for verb in ("/torrents/start", "/torrents/resume"):
+            try:
+                qbt(verb, {"hashes": arrived})
+                break
+            except Exception:
+                continue
 
     if not added:
         sys.exit("  qBittorrent started none of them")
@@ -761,6 +959,16 @@ def main() -> None:
     results = []
     for torrent in done:
         folder = host_path(torrent.get("content_path") or torrent.get("save_path", ""))
+        picked_paths = wanted.get(torrent["hash"].lower())
+        if picked_paths:
+            # The torrent's own folder is the whole discography; the album sits
+            # in one directory inside it, and judging the outer folder would
+            # average this record together with every other one in the box.
+            save = host_path(torrent.get("save_path", ""))
+            inner = {os.path.dirname(os.path.join(save, rel)) for rel in picked_paths}
+            existing = sorted(d for d in inner if os.path.isdir(d))
+            if existing:
+                folder = os.path.commonpath(existing) if len(existing) > 1 else existing[0]
         if not os.path.exists(folder):
             print(f"  cannot find {folder}")
             continue
