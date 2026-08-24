@@ -86,8 +86,8 @@ UA = "navidrome-lidarr-bridge-audition/1.0"
 
 # ── talking to the stack ──────────────────────────────────────────────────
 
-def _json(url: str, headers: dict, data=None, timeout=120):
-    req = urllib.request.Request(url, data=data, headers=headers)
+def _json(url: str, headers: dict, data=None, timeout=120, method=None):
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read()
     return json.loads(body) if body else {}
@@ -783,15 +783,32 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list
     candidates.sort(key=lambda r: -(r.get("seeders") or 0))
     probe_magnets(candidates, album["title"], probe)
 
-    kept = []
+    # A candidate has to be able to be this album. Widening the search to the
+    # artist alone removed the guarantee the narrow search gave for free: every
+    # result used to be about the album by construction. Without that, "an
+    # unreadable file list leaves it in the running" lets the entire catalogue
+    # in, and ranking by seeders then picks the artist's most popular torrent —
+    # which is how an audition for Along Came a Spider came within seconds of
+    # downloading Road, Zipper Catches Skin, DaDa and The Eyes of Alice Cooper.
+    #
+    # So contents decide when they are known, and the name has to stand in when
+    # they are not. Neither is enough on its own.
+    key = norm(album["title"])
+    kept, unrelated = [], 0
     for rel in candidates:
-        # An empty list means the file list was readable and the album is not in
-        # there. That is a real answer and it disqualifies the release — unlike
-        # an unreadable list, which says nothing either way and leaves it in.
-        if rel.get("_want") == []:
-            missing += 1
+        contents = rel.get("_want")
+        if rel.get("_files") is not None:
+            # The list was read. An empty result means the album is not in there.
+            if contents == []:
+                missing += 1
+                continue
+            kept.append(rel)
             continue
-        kept.append(rel)
+        # Nothing could be read, so the name is all there is to go on.
+        if key and key in norm(rel.get("title") or ""):
+            kept.append(rel)
+        else:
+            unrelated += 1
 
     # Lossless first, then the ones that would not say. A release proven lossy is
     # only worth downloading when nothing better is on offer. Among equals a
@@ -802,8 +819,9 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list
     picked = [c for c in kept if c["_kind"] != "empty"][:want]
 
     print(f"\n  auditioning {len(picked)} of {len(candidates)}: "
-          f"{dead} with fewer than {min_seeders} seeders, "
-          f"{missing} that do not contain this album, "
+          f"{dead} with too few seeders, "
+          f"{missing} read and lacking this album, "
+          f"{unrelated} neither named for it nor opened, "
           f"{max(0, len(kept) - len(picked))} ranked out\n")
     for rel in picked:
         note = ""
@@ -1025,6 +1043,28 @@ def main() -> None:
     print("\n  WINNER: this is an upgrade")
     if not args.keep_losers:
         cleanup(added, winner["torrent"]["hash"].lower())
+
+    # Lidarr compares the format a file declares, not what it contains, and a
+    # transcode declaring 24-bit outranks a genuine 16-bit one. Handing over the
+    # honest file was not enough: Lidarr answered "Not an upgrade for existing
+    # track file(s). New Quality is FLAC" and threw it away, leaving the fake in
+    # place. When the audition has established that what is held is a transcode
+    # or a padded depth, the held file goes first — otherwise the whole exercise
+    # ends where it started.
+    if have and (have.get("transcoded") or have.get("padded_depth")):
+        held = lidarr(f"/trackfile?albumId={album['id']}")
+        if held:
+            print(f"  removing the {len(held)} files already held: what the audition "
+                  f"measured as {'a transcode' if have.get('transcoded') else 'a padded depth'}, "
+                  f"Lidarr reads as the better format and would refuse to replace")
+            try:
+                _json(f"{LIDARR_URL}/api/v1/trackfile/bulk",
+                      {"X-Api-Key": LIDARR_API_KEY, "Content-Type": "application/json"},
+                      data=json.dumps({"trackFileIds": [f["id"] for f in held]}).encode(),
+                      timeout=120, method="DELETE")
+            except Exception as exc:
+                print(f"  could not remove them ({type(exc).__name__}); Lidarr will "
+                      f"likely refuse the import as not an upgrade")
 
     # Handing it over rather than importing it here: Lidarr owns naming, the
     # root folder and the file it replaces, and it already does all of that.
