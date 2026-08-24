@@ -73,6 +73,12 @@ TAG = "ndlb-audition"
 PROBE_TAG = "ndlb-probe"
 LIDARR_CATEGORY = os.environ.get("QBIT_LIDARR_CATEGORY", "lidarr")
 
+# Names that suggest a torrent holds more than one record, and so might hold
+# the one being looked for even though it is not named after it.
+COLLECTION_WORDS = ("discography", "discografia", "collection", "complete",
+                    "anthology", "box", "album series", "album classics",
+                    "cd discography", "remastered on", "all albums")
+
 LOSSLESS_EXT = {"flac", "ape", "wv", "alac", "m4a", "aiff", "wav"}
 LOSSY_EXT = {"mp3", "ogg", "opus", "aac", "wma", "m4b"}
 UA = "navidrome-lidarr-bridge-audition/1.0"
@@ -337,14 +343,33 @@ def probe_magnets(candidates: list[dict], title: str, limit: int) -> None:
     moves, and afterwards every candidate can be judged on what it actually
     contains rather than on its name.
     """
-    need = [c for c in candidates if c.get("_files") is None and c.get("_hash")][:limit]
+    unknown = [c for c in candidates if c.get("_files") is None and c.get("_hash")]
+    # Seeders alone put the fourteen most popular Alice Cooper torrents at the
+    # front, not one of which was the album asked for. The name is a weak signal
+    # and it is why the file list is being read at all — but it is the only
+    # signal available before the metadata arrives, so it decides the order.
+    key = norm(title)
+    def relevance(cand: dict) -> tuple:
+        name = norm(cand.get("title") or "")
+        if key and key in name:
+            return (0, -(cand.get("seeders") or 0))
+        if any(word in name for word in COLLECTION_WORDS):
+            return (1, -(cand.get("seeders") or 0))
+        return (2, -(cand.get("seeders") or 0))
+    need = sorted(unknown, key=relevance)[:limit]
     if not need:
         return
-    print(f"\n  reading the contents of {len(need)} magnets (metadata only)")
+    named = sum(1 for c in need if key and key in norm(c.get("title") or ""))
+    print(f"\n  reading the contents of {len(need)} magnets (metadata only): "
+          f"{named} named for this album, {len(need) - named} that might contain it")
     qbt("/torrents/createTags", {"tags": PROBE_TAG})
+    # Not "stopped": a stopped torrent connects to nobody and so never receives
+    # the metadata this is here to read — fourteen of them sat at 0 bytes for
+    # three minutes. stopCondition lets it start, take the few kilobytes of
+    # metadata, and halt itself before any content moves.
     fields = {"category": PROBE_TAG, "tags": PROBE_TAG,
               "savepath": f"{PATH_FROM}/torrents/{PROBE_TAG}",
-              "paused": "true", "stopped": "true"}
+              "stopCondition": "MetadataReceived"}
     added = []
     for cand in need:
         try:
