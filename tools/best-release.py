@@ -77,6 +77,13 @@ TAG = "ndlb-audition"
 PROBE_TAG = "ndlb-probe"
 LIDARR_CATEGORY = os.environ.get("QBIT_LIDARR_CATEGORY", "lidarr")
 
+# Vinyl rips carry surface noise, channel imbalance and whatever the needle and
+# the pressing did that day. Some people prefer exactly that; this library does
+# not, and Lidarr already refuses them by release profile — so the audition
+# should not spend a download proving it.
+VINYL_WORDS = ("vinyl", "vinilo", "pbthal", "needledrop", "needle drop",
+               "analog rip", "lp rip", "[lp]", "(lp)", "2lp", "12 inch")
+
 # Names that suggest a torrent holds more than one record, and so might hold
 # the one being looked for even though it is not named after it.
 COLLECTION_WORDS = ("discography", "discografia", "collection", "complete",
@@ -812,7 +819,7 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list
             results.append(rel)
     print(f"  {len(results)} results between them\n")
 
-    seen, candidates, dead, missing = set(), [], 0, 0
+    seen, candidates, dead, missing, vinyl = set(), [], 0, 0, 0
     for rel in sorted(results, key=lambda r: -(r.get("seeders") or 0)):
         title = rel.get("title") or ""
         key = re.sub(r"[^a-z0-9]+", "", title.lower())
@@ -823,6 +830,10 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list
         # would hold the audition open for the full timeout and arrive never.
         if (rel.get("seeders") or 0) < min_seeders:
             dead += 1
+            continue
+        low = title.lower()
+        if any(word in low for word in VINYL_WORDS):
+            vinyl += 1
             continue
         raw, link = fetch_release(rel.get("downloadUrl") or rel.get("guid") or "")
         names = torrent_files(raw)
@@ -875,7 +886,7 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list
     picked = [c for c in kept if c["_kind"] != "empty"][:want]
 
     print(f"\n  auditioning {len(picked)} of {len(candidates)}: "
-          f"{dead} with too few seeders, "
+          f"{dead} with too few seeders, {vinyl} vinyl rips, "
           f"{missing} read and lacking this album, "
           f"{unrelated} neither named for it nor opened, "
           f"{max(0, len(kept) - len(picked))} ranked out\n")
