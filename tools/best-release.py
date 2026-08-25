@@ -1135,7 +1135,13 @@ def main() -> None:
                 cleanup(added, None)
             return
 
-    print("\n  WINNER: this is an upgrade")
+    if winner["audit"].get("transcoded") or winner["audit"].get("padded_depth"):
+        # Better than what is held is not the same as good. Saying "upgrade"
+        # about a decoded MP3 is how a library fills up with them.
+        print("\n  the best on offer is itself a transcode — taking it because it "
+              "beats what is held, but a genuine copy of this record was not found")
+    else:
+        print("\n  WINNER: this is an upgrade")
     if not args.keep_losers:
         cleanup(added, winner["torrent"]["hash"].lower())
 
