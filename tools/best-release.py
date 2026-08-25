@@ -980,12 +980,14 @@ def main() -> None:
 
     print()
     qbt("/torrents/createTags", {"tags": TAG})
-    # Added stopped, so a discography can be told which files to skip before it
-    # starts fetching all of them. Both spellings are sent: the client renamed
-    # "paused" to "stopped", and it ignores the one it does not know.
+    # stopCondition, not "stopped": a stopped magnet connects to nobody and so
+    # never learns its own file list, and without that list there are no indexes
+    # to mark as skip. That is how an audition for one album started fetching a
+    # 50 CD discography — 6.4 GB — after reporting it would skip 758 of its 768
+    # files.
     fields = {"category": TAG, "tags": TAG,
               "savepath": f"{PATH_FROM}/torrents/{TAG}",
-              "paused": "true", "stopped": "true"}
+              "stopCondition": "MetadataReceived"}
     # Added one at a time so the client's own list says which torrent each
     # release became. An indexer link can be a torrent, a redirect to a magnet,
     # or a page that refuses to be read at all, and only some of those yield an
@@ -1032,23 +1034,49 @@ def main() -> None:
             continue
         added.append(arrived)
         keep = rel.get("_want")
-        if keep:
+        if not keep:
+            print(f"  added:        {title}")
+        else:
+            # Matched against the client's OWN list rather than the one read
+            # earlier: the indexes that matter are the ones it uses, and it only
+            # has them once the metadata has arrived.
+            listing = []
+            for _ in range(20):
+                try:
+                    got = qbt(f"/torrents/files?hash={arrived}")
+                except Exception:
+                    got = None
+                if isinstance(got, list) and got:
+                    listing = sorted(got, key=lambda f: f.get("index", 0))
+                    break
+                time.sleep(6)
             names = rel.get("_files") or []
-            skip = [str(i) for i in range(len(names)) if i not in set(keep)]
-            if skip:
+            want_names = {names[i] for i in keep if i < len(names)}
+            skip = [str(f.get("index", i)) for i, f in enumerate(listing)
+                    if f["name"] not in want_names]
+            if listing and len(skip) < len(listing):
                 try:
                     qbt("/torrents/filePrio",
                         {"hash": arrived, "id": "|".join(skip), "priority": "0"})
-                    wanted[arrived] = [names[i] for i in keep]
+                    wanted[arrived] = sorted(want_names)
                     print(f"  added:        {title}")
-                    print(f"                skipping {len(skip)} files that are "
-                          f"not this album")
+                    print(f"                skipping {len(skip)} of {len(listing)} "
+                          f"files that are not this album")
                 except Exception as exc:
-                    # Better to fetch the whole thing than to fetch nothing.
-                    print(f"  added:        {title} (could not skip files: "
-                          f"{type(exc).__name__}; taking all of it)")
-        else:
-            print(f"  added:        {title}")
+                    # Taking a whole discography to get one album is not a
+                    # tolerable fallback; it is the thing this avoids.
+                    print(f"  refused:      {title} — cannot skip its other "
+                          f"{len(skip)} files ({type(exc).__name__})")
+                    qbt("/torrents/delete", {"hashes": arrived, "deleteFiles": "true"})
+                    added.pop()
+                    continue
+            else:
+                print(f"  refused:      {title} — its file list never arrived, so "
+                      f"the {len(names) - len(keep)} files that are not this album "
+                      f"cannot be skipped")
+                qbt("/torrents/delete", {"hashes": arrived, "deleteFiles": "true"})
+                added.pop()
+                continue
         for verb in ("/torrents/start", "/torrents/resume"):
             try:
                 qbt(verb, {"hashes": arrived})
