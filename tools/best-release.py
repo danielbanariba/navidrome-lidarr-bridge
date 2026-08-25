@@ -57,6 +57,10 @@ LIDARR_API_KEY = os.environ.get("LIDARR_API_KEY", "")
 PROWLARR_URL = os.environ.get("PROWLARR_URL", "http://localhost:9696").rstrip("/")
 PROWLARR_API_KEY = os.environ.get("PROWLARR_API_KEY", "")
 QBIT_URL = os.environ.get("QBIT_URL", "http://localhost:8090").rstrip("/")
+NAVIDROME_URL = os.environ.get("NAVIDROME_URL", "http://localhost:4533").rstrip("/")
+NAVIDROME_USER = os.environ.get("NAVIDROME_USER", "")
+NAVIDROME_PASS = os.environ.get("NAVIDROME_PASS", "")
+MUSIC_FOLDER = os.environ.get("NAVIDROME_MUSIC_FOLDER", "/mnt/Entretenimiento/Musica")
 # What Prowlarr is called from inside the download client's network.
 CLIENT_PROWLARR = os.environ.get("CLIENT_PROWLARR_URL", "http://prowlarr:9696").rstrip("/")
 
@@ -692,19 +696,71 @@ def host_path(reported: str) -> str:
     return reported.replace(PATH_FROM, PATH_TO, 1) if reported.startswith(PATH_FROM) else reported
 
 
-def incumbent(album_id: int) -> dict | None:
+def navidrome_folders(artist: str, title: str) -> set[str]:
+    """Where the wider library keeps this album, if it keeps it at all.
+
+    Lidarr only ever sees its own root folder, and this tool inherited that
+    blindness: with no file of its own it concluded nothing was held, and an
+    audition then imported a copy of a record already on the shelf under a
+    different tree. Navidrome indexes everything, so it is the one that knows.
+    """
+    if not (NAVIDROME_USER and NAVIDROME_PASS):
+        return set()
+    try:
+        body = json.dumps({"username": NAVIDROME_USER,
+                           "password": NAVIDROME_PASS}).encode()
+        token = _json(f"{NAVIDROME_URL}/auth/login",
+                      {"Content-Type": "application/json"},
+                      data=body, timeout=30)["token"]
+        head = {"X-ND-Authorization": f"Bearer {token}"}
+        artists = _json(f"{NAVIDROME_URL}/api/artist?_start=0&_end=5000", head)
+        match = next((a for a in artists
+                      if norm(a.get("name", "")) == norm(artist)), None)
+        if not match:
+            return set()
+        albums = _json(
+            f"{NAVIDROME_URL}/api/album?artist_id={urllib.parse.quote(match['id'])}"
+            f"&_start=0&_end=500", head)
+        wanted = [a for a in albums if norm(a.get("name", "")) == norm(title)]
+        folders = set()
+        for alb in wanted:
+            songs = _json(
+                f"{NAVIDROME_URL}/api/song?album_id={urllib.parse.quote(alb['id'])}"
+                f"&_start=0&_end=200", head)
+            for song in songs:
+                rel = song.get("path")
+                if not rel:
+                    continue
+                full = rel if os.path.isabs(rel) else os.path.join(MUSIC_FOLDER, rel)
+                if os.path.exists(full):
+                    folders.add(os.path.dirname(full))
+        return folders
+    except Exception:
+        return set()
+
+
+def incumbent(album_id: int, artist: str = "", title: str = "") -> dict | None:
     """What the library already holds for this album, judged the same way.
 
     Without this the audition can only say which candidate is best, not whether
     any of them is worth having: handing Lidarr a copy no better than the one it
     imported last week costs a download and changes nothing.
+
+    Lidarr's own files come first, and the wider library answers when it has
+    none — which is most of the time for anything collected before Lidarr
+    existed.
     """
     try:
         files = lidarr(f"/trackfile?albumId={album_id}")
     except Exception:
-        return None
+        files = []
     folders = {os.path.dirname(host_path(f["path"])) for f in files if f.get("path")}
     folders = {d for d in folders if os.path.isdir(d)}
+    if not folders and artist and title:
+        folders = navidrome_folders(artist, title)
+        if folders:
+            print(f"  Lidarr holds no file for this; the library does: "
+                  f"{sorted(folders)[0]}")
     if not folders:
         return None
     best = None
@@ -1031,7 +1087,7 @@ def main() -> None:
     print(f"\n  best candidate: {winner['torrent']['name'][:56]}")
     print(f"      {describe(winner['audit'])}")
 
-    have = incumbent(album["id"])
+    have = incumbent(album["id"], album.get("artist", ""), album.get("title", ""))
     if have:
         print(f"  already held:   {describe(have)}")
         if score(have) >= winner["score"]:
