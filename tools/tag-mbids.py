@@ -59,10 +59,20 @@ UA = os.environ.get(
 
 # The three ids worth writing. A recording id would have to be matched track by
 # track, which is a different and far less reliable job than naming the artist.
+# ID3 and Vorbis do not name these the same way, and neither is derivable from
+# the other: "MusicBrainz Artist Id" with the space removed gives
+# MUSICBRAINZARTISTID, which is not what any FLAC reader looks for. Navidrome's
+# own mappings.yaml lists MUSICBRAINZ_ARTISTID, with the underscore, and a file
+# tagged the other way carries ids nothing will ever read.
 TAGS = {
     "artist": "MusicBrainz Artist Id",
     "albumartist": "MusicBrainz Album Artist Id",
     "releasegroup": "MusicBrainz Release Group Id",
+}
+VORBIS = {
+    "MusicBrainz Artist Id": "MUSICBRAINZ_ARTISTID",
+    "MusicBrainz Album Artist Id": "MUSICBRAINZ_ALBUMARTISTID",
+    "MusicBrainz Release Group Id": "MUSICBRAINZ_RELEASEGROUPID",
 }
 
 
@@ -160,7 +170,12 @@ def write_tags(path: str, values: dict[str, str]) -> bool:
     if path.lower().endswith(".flac"):
         audio = FLAC(path)
         for desc, value in values.items():
-            audio[desc.upper().replace(" ", "")] = value
+            field = VORBIS[desc]
+            # An earlier version wrote the space-stripped name; clear it so a
+            # file tagged by that version does not keep a key nothing reads.
+            for stale in (desc.upper().replace(" ", ""), desc.lower().replace(" ", "")):
+                audio.pop(stale, None)
+            audio[field] = value
         audio.save()
         return True
     try:
