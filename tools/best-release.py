@@ -1066,6 +1066,25 @@ def main() -> None:
                 print(f"  could not remove them ({type(exc).__name__}); Lidarr will "
                       f"likely refuse the import as not an upgrade")
 
+    # Stop Lidarr hunting this album before handing anything over. It ranks by
+    # the format a file declares, so a verified 16-bit FLAC sits below a cutoff
+    # of "Lossless 24bit" and reads as unfinished business — it went looking,
+    # found the transcode advertising 24-bit, deleted the honest files and put
+    # the fake back, all inside the same second. Unmonitored, the album keeps
+    # what the audition chose.
+    if have and (have.get("transcoded") or have.get("padded_depth")):
+        try:
+            record = lidarr(f"/album/{album['id']}")
+            record["monitored"] = False
+            _json(f"{LIDARR_URL}/api/v1/album/{album['id']}",
+                  {"X-Api-Key": LIDARR_API_KEY, "Content-Type": "application/json"},
+                  data=json.dumps(record).encode(), timeout=60, method="PUT")
+            print("  unmonitored in Lidarr: what it calls an upgrade here is the "
+                  "transcode this audition just rejected")
+        except Exception as exc:
+            print(f"  could not unmonitor it ({type(exc).__name__}); Lidarr may "
+                  f"replace this with the release that merely claims to be better")
+
     # Handing it over rather than importing it here: Lidarr owns naming, the
     # root folder and the file it replaces, and it already does all of that.
     qbt("/torrents/setCategory",
