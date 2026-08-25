@@ -355,6 +355,26 @@ Both tools need `mutagen` and `numpy`:
 python3 -m venv .venv && .venv/bin/pip install mutagen numpy
 ```
 
+## When the album is one file: `tools/split-cue.py`
+
+An EAC rip is often one audio file plus a cue sheet saying where each track
+begins. Navidrome reads that happily. Lidarr cannot read a cue sheet at all — it
+works per track, so a whole album in one FLAC reaches it as a single unmatched
+file and the import fails with "Couldn't find similar album", which says nothing
+about the real reason.
+
+```
+tools/split-cue.py <folder>                 # print a plan
+tools/split-cue.py <folder> --out <dir>     # cut the tracks
+```
+
+The original is never touched. Two details cost a while to find and are worth
+naming: cue sheets are rarely UTF-8, and reading one as UTF-8 turned "The Sunken
+Norwegian" into mojibake and carried it into the file name; and ffmpeg's FLAC
+decoder refused one track of an image that both the reference decoder and the
+rip's own CRC call perfect, so when it fails the reference decoder takes the
+excerpt and ffmpeg only re-encodes it.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in the Navidrome credentials and the
