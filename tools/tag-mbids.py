@@ -227,8 +227,25 @@ def main() -> None:
         written += done
         print(f"    {title[:38]:<40} {done:>3} written")
 
+    # Navidrome's ordinary scan decides what to revisit from the DIRECTORY's
+    # modification time, and rewriting a file inside it does not change that.
+    # One folder here was last modified in May 2025 while the files in it were
+    # written minutes ago, so an ordinary rescan read nothing and the ids sat in
+    # the files unseen. Touching the folder is enough to make the cheap scan
+    # notice, and saves asking for a full one over the whole library.
+    touched = set()
+    for _, _, files in plan:
+        for path in files:
+            touched.add(os.path.dirname(path))
+    now = time.time()
+    for folder in touched:
+        try:
+            os.utime(folder, (now, now))
+        except OSError:
+            pass
+
     print(f"\n  {written} of {total} files tagged")
-    print("  rescan in Navidrome for it to read them back")
+    print(f"  {len(touched)} folders touched so an ordinary Navidrome scan sees them")
 
 
 if __name__ == "__main__":
