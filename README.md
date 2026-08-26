@@ -375,6 +375,39 @@ decoder refused one track of an image that both the reference decoder and the
 rip's own CRC call perfect, so when it fails the reference decoder takes the
 excerpt and ffmpeg only re-encodes it.
 
+## The albums with no cover: `tools/fetch-covers.py`
+
+Navidrome draws its own placeholder when a folder holds no image and the files
+carry none embedded — a blue record with the word "navidrome" on it. It is not
+wrong, but a shelf of them is unreadable: covers are how anyone finds an album
+at a glance, and 166 albums here had none.
+
+Half of that is a switch rather than a program. Lidarr writes cover art for what
+it manages once its metadata provider is enabled — Settings → Metadata → Kodi /
+Emby, with only the image options on, since the `.nfo` files it also offers are
+noise in folders that are already organised. Nothing writes it for the rest of a
+library, which is most of it.
+
+```
+tools/fetch-covers.py                    # list what is missing, write nothing
+tools/fetch-covers.py --apply            # fetch and write cover.jpg
+tools/fetch-covers.py --apply --limit 20 # a few at a time
+```
+
+Three sources, best first. The Cover Art Archive is asked by release-group id
+whenever the files carry one, which is exact; failing that MusicBrainz is
+searched for the id; Discogs answers last, because its images are smaller and
+its match is looser. The largest on offer wins, and anything under 400 pixels is
+refused — a thumbnail stretched across a tile looks worse than the placeholder.
+
+A title carries what the pressing added to it: `Zero Days (SPV279182CD)`,
+`QR III [32DP 469]`. Handed to a catalogue search that matches nothing at all,
+which is why the first run found covers for two albums out of twelve. Searching
+the bare title finds them.
+
+The folder is touched after writing, because Navidrome decides what to revisit
+from the directory's timestamp and would otherwise never look inside again.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in the Navidrome credentials and the
