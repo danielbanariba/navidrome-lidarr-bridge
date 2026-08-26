@@ -49,6 +49,8 @@ Honduran metal band — and nothing else comes close. So each candidate's
 discography is fetched from MusicBrainz and compared against what the library
 already holds; the one that overlaps wins.
 
+![How the band is identified](docs/identity.svg)
+
 **Being the only match is not the same as being the right band.** That check
 first ran only when several artists shared a name, so a single match was taken
 on trust — and exactly one artist in MusicBrainz is called "Nihilismo", a punk
@@ -348,8 +350,12 @@ ranked below the MP3 already held, and therefore never taken as an upgrade. That
 is the right call from Lidarr: it cannot prove any of them is better. The one
 with 39 seeders was MP3.
 
-The only way to know what a release is, is to look. `best-release.py` auditions
-several candidates at once and keeps the best, checking cheapest first:
+The only way to know what a release is, is to look.
+
+![How a release is auditioned](docs/audition.svg)
+
+`best-release.py` auditions several candidates at once and keeps the best,
+checking cheapest first:
 
 1. **The torrent's own file list**, which costs no download at all and rules out
    everything carrying no lossless file.
