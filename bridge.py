@@ -333,6 +333,25 @@ def owns_title(owned: set[str], title: str) -> bool:
     return owned_match(owned, title) is not None
 
 
+# A split is credited to two acts, and no two catalogues write it the same way:
+# the library calls one here "Mizar vs Spasm" where MusicBrainz has
+# "Spasm / Mizar". Same record, same two bands, reversed — and compared as
+# strings it read as an album nobody owns.
+_SPLIT = re.compile(r"\s+vs\s+")
+
+
+def split_parts(key: str) -> frozenset[str] | None:
+    """The acts named by a split title, or None when it is not one.
+
+    Only titles that name more than one act qualify, so an ordinary album is
+    never compared this way — matching by unordered parts is looser than
+    matching by string, and it is only safe where the order genuinely carries
+    no meaning.
+    """
+    parts = {p.strip() for p in _SPLIT.split(key) if p.strip()}
+    return frozenset(parts) if len(parts) > 1 else None
+
+
 def owned_match(owned, title: str) -> str | None:
     """The owned title that satisfies this catalogue title, or None.
 
@@ -344,6 +363,11 @@ def owned_match(owned, title: str) -> str | None:
     for have in owned:
         if have == key or have.startswith(key + " "):
             return have
+    parts = split_parts(key)
+    if parts is not None:
+        for have in owned:
+            if split_parts(have) == parts:
+                return have
     return None
 
 
@@ -486,6 +510,7 @@ _ABBREV = {
     "st": "saint", "ste": "saint", "sainte": "saint",
     "dr": "doctor",
     "vol": "volume", "pt": "part", "no": "number", "num": "number",
+    "versus": "vs", "v": "vs",
 }
 
 
@@ -504,9 +529,18 @@ def norm_title(title: str) -> str:
     """
     folded = unicodedata.normalize("NFKD", title.lower())
     folded = "".join(c for c in folded if not unicodedata.combining(c))
-    text = re.sub(r"\(.*?\)|\[.*?\]", " ", folded)
+    # Only a bracketed group that stands on its own is an edition note. One
+    # written inside a word is part of the title: "Pussy(De)Luxe" reduced to
+    # "pussy luxe" while the same record spelled "Pussy De Luxe" reduced to
+    # "pussy de luxe", so one album was listed twice as two different missing
+    # records — and offered for download twice.
+    text = re.sub(r"(?:^|(?<=\s))[(\[].*?[)\]]", " ", folded)
     text = _EDITION.sub(" ", text)
     text = text.replace("&", " and ")
+    # A slash between two names means the same thing as "vs", and it has to
+    # survive as a word: stripped to whitespace it left "spasm mizar" against
+    # "mizar vs spasm", which no longer look like the same split at all.
+    text = re.sub(r"\s*[/\\]\s*", " vs ", text)
     words = re.sub(r"[^a-z0-9]+", " ", text).split()
     return " ".join(_ABBREV.get(w, w) for w in words)
 
