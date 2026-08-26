@@ -216,6 +216,20 @@ MusicBrainz. Abbreviations are folded too — `M.` and `Mr`, `St.` and `Saint`,
 and `Mr Patate` on disk against `M. Patate` in the catalogue had one album
 listed as both owned and missing at the same time.
 
+A bracketed group counts as an edition note only when it stands on its own. One
+written inside a word is part of the title: stripping it turned `Pussy(De)Luxe`
+into `pussy luxe` while the same record spelled `Pussy De Luxe` became `pussy de
+luxe`, so one album appeared twice in the missing list and was offered for
+download twice.
+
+Splits are compared without regard to order, and only splits. Two acts share the
+sleeve and no two catalogues write them the same way — the library here holds
+`Mizar vs Spasm` where MusicBrainz has `Spasm / Mizar`, the same record reversed
+— so the slash survives normalisation as the word it means and a title naming
+more than one act is compared as an unordered set of parts. An ordinary album is
+never compared that way: matching without regard to order is looser than
+matching by string, and it is safe only where the order carries no meaning.
+
 That also collapses a `(Live)` variant onto the studio album of the same name,
 which can hide a live release — the safe direction, since the cost is a missing
 suggestion rather than re-downloading something already owned.
