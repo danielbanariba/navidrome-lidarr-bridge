@@ -511,17 +511,24 @@ def missing_albums(nd_artist_id: str) -> dict:
 
     # Lidarr's catalogue is what can actually be requested, because everything
     # it does is keyed on MusicBrainz ids.
-    requestable = {}
+    requestable, held = {}, []
     for album in lidarr_get(f"/api/v1/album?artistId={match['id']}"):
-        if not is_owned(album["title"]):
-            requestable[norm_title(album["title"])] = {
-                "id": album["id"], "title": album["title"],
-                "year": (album.get("releaseDate") or "")[:4],
-                "type": album.get("albumType", ""), "requestable": True,
-                # The release-group id, so a caller can fetch cover art for an
-                # album nobody owns a copy of.
-                "mbid": album.get("foreignAlbumId"),
-            }
+        entry = {
+            "id": album["id"], "title": album["title"],
+            "year": (album.get("releaseDate") or "")[:4],
+            "type": album.get("albumType", ""), "requestable": True,
+            # The release-group id, so a caller can fetch cover art for an
+            # album nobody owns a copy of.
+            "mbid": album.get("foreignAlbumId"),
+        }
+        if is_owned(album["title"]):
+            # Owned is not the same as finished. A record held only as MP3 can
+            # still be asked for, and the panel cannot ask without an id — so
+            # the ones already on the shelf are named too, and whoever draws
+            # them decides which are worth offering to improve.
+            held.append(entry)
+        else:
+            requestable[norm_title(album["title"])] = entry
     missing = dict(requestable)
 
     # Discogs lists records MusicBrainz has never heard of — this band's 2017
@@ -550,7 +557,8 @@ def missing_albums(nd_artist_id: str) -> dict:
 
     missing = sorted(missing.values(), key=lambda a: a["year"] or "9999")
     return {"artist": name, "monitored": True, "owned": len(owned),
-            "lidarrArtistId": match["id"], "missing": missing}
+            "artistMbid": mbid, "lidarrArtistId": match["id"],
+            "missing": missing, "held": held}
 
 
 def importlist_defaults() -> dict:
@@ -588,6 +596,33 @@ def import_artist_for(mbid: str) -> int:
     artist = (found[0] or {}).get("artist") or {}
     if not artist.get("foreignArtistId"):
         raise BridgeError(f"Lidarr's catalogue has no artist for album {mbid}")
+
+    # The artist may already be there while this particular release is not:
+    # Lidarr's metadata profile decides which release types it lists, and a
+    # single, a bootleg or a live set is often left out of an artist it fully
+    # holds. Adding the artist again answers "This artist has already been
+    # added" with a 400, which reached the panel as a bare "Failed".
+    held = next((a for a in lidarr_get("/api/v1/artist")
+                 if a.get("foreignArtistId") == artist["foreignArtistId"]), None)
+    if held is not None:
+        log.info("artist %r already in Lidarr; refreshing for album %s",
+                 held.get("artistName"), mbid)
+        try:
+            _post_json(f"{LIDARR_URL}/api/v1/command",
+                       {"name": "RefreshArtist", "artistId": held["id"]},
+                       {"X-Api-Key": LIDARR_API_KEY})
+        except FETCH_ERRORS as exc:
+            log.warning("could not refresh %s: %s", held.get("artistName"), exc)
+        deadline = time.monotonic() + IMPORT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            album_id = album_id_for_mbid(mbid)
+            if album_id is not None:
+                return album_id
+            time.sleep(1)
+        raise BridgeError(
+            f"Lidarr holds {held.get('artistName')!r} but does not list this "
+            f"release — its metadata profile leaves out singles, bootlegs and "
+            f"live sets, and nothing here can add one it will not carry")
 
     payload = dict(artist)
     payload.update(monitored=True, **importlist_defaults())
