@@ -330,8 +330,21 @@ def owns_title(owned: set[str], title: str) -> bool:
     have to answer it the same way. When they disagreed, an artist whose only
     shared record carried such a suffix looked like a different band entirely.
     """
+    return owned_match(owned, title) is not None
+
+
+def owned_match(owned, title: str) -> str | None:
+    """The owned title that satisfies this catalogue title, or None.
+
+    Same rule as owns_title, which is written in terms of this one so the two
+    can never drift. Callers that need to know *which* copy matched — to name
+    its Navidrome id, say — ask here instead of matching titles a second time.
+    """
     key = norm_title(title)
-    return any(have == key or have.startswith(key + " ") for have in owned)
+    for have in owned:
+        if have == key or have.startswith(key + " "):
+            return have
+    return None
 
 
 def catalogue_overlap(mbid: str, owned: set[str]) -> tuple[set[str], int]:
@@ -463,6 +476,19 @@ _EDITION = re.compile(
     r"\b(remaster(ed)?|deluxe|expanded|anniversary|edition|reissue|bonus|disc|cd\d*)\b")
 
 
+# One word, spelled two ways on either side of the comparison. The library holds
+# "Mr Patate" where MusicBrainz lists "M. Patate", and once the period is gone
+# "mr" no longer looks anything like "m" — so the album the library already has
+# is reported as missing, and offered for download a second time.
+_ABBREV = {
+    "m": "mr", "mister": "mr", "monsieur": "mr",
+    "mme": "mrs", "madame": "mrs", "missus": "mrs",
+    "st": "saint", "ste": "saint", "sainte": "saint",
+    "dr": "doctor",
+    "vol": "volume", "pt": "part", "no": "number", "num": "number",
+}
+
+
 def norm_title(title: str) -> str:
     """Compare album titles across catalogues that disagree on how to spell them.
 
@@ -472,13 +498,38 @@ def norm_title(title: str) -> str:
     Discogs has "Xibalbá" where MusicBrainz has "Xibalba".
 
     Accents are folded rather than stripped: dropping the character outright
-    would turn "Xibalbá" into "xibalb a" and stop it matching at all.
+    would turn "Xibalbá" into "xibalb a" and stop it matching at all. An
+    ampersand becomes the word for the same reason: deleting it leaves "rock
+    roll" against "rock and roll", which are the same record.
     """
     folded = unicodedata.normalize("NFKD", title.lower())
     folded = "".join(c for c in folded if not unicodedata.combining(c))
     text = re.sub(r"\(.*?\)|\[.*?\]", " ", folded)
     text = _EDITION.sub(" ", text)
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+    text = text.replace("&", " and ")
+    words = re.sub(r"[^a-z0-9]+", " ", text).split()
+    return " ".join(_ABBREV.get(w, w) for w in words)
+
+
+# Secondary types that describe a record rather than add one to a discography.
+_NOT_A_GAP = {
+    "compilation", "live", "remix", "soundtrack", "dj-mix", "mixtape/street",
+    "demo", "interview", "audiobook", "audio drama", "spokenword",
+}
+
+
+def is_studio(album: dict) -> bool:
+    """Whether a Lidarr album counts as a gap when the library lacks it.
+
+    Lidarr's metadata profile is deliberately wide, so that every record the
+    library already holds — demos, EPs, live sets — is catalogued and can carry
+    a quality badge. That same width would otherwise fill the missing list with
+    singles nobody considers absent.
+    """
+    if (album.get("albumType") or "") != "Album":
+        return False
+    return not any((s or "").lower() in _NOT_A_GAP
+                   for s in (album.get("secondaryTypes") or []))
 
 
 def missing_albums(nd_artist_id: str) -> dict:
@@ -492,7 +543,16 @@ def missing_albums(nd_artist_id: str) -> dict:
     name = (artist.get("name") or "").strip()
     if not name:
         raise BridgeError(f"no Navidrome artist with id {nd_artist_id!r}")
-    owned = {norm_title(a["name"]) for a in artist.get("album", []) if a.get("name")}
+    # Titles are how the catalogues are compared, but they are a poor way to
+    # pair a browser tile with its entry afterwards: MusicBrainz files the 1999
+    # demo as "Ultra Vomit" while the library calls the folder "Demo", and no
+    # amount of normalising makes those two strings meet. The Navidrome id does
+    # meet, exactly, so it travels with the answer.
+    owned_ids: dict[str, str] = {}
+    for album in artist.get("album", []):
+        if album.get("name") and album.get("id"):
+            owned_ids.setdefault(norm_title(album["name"]), album["id"])
+    owned = set(owned_ids)
 
     def is_owned(title: str) -> bool:
         return owns_title(owned, title)
@@ -518,9 +578,9 @@ def missing_albums(nd_artist_id: str) -> dict:
 
     # Lidarr's catalogue is what can actually be requested, because everything
     # it does is keyed on MusicBrainz ids.
-    requestable, held = {}, []
+    entries = []
     for album in lidarr_get(f"/api/v1/album?artistId={match['id']}"):
-        entry = {
+        entries.append((album, {
             "id": album["id"], "title": album["title"],
             "year": (album.get("releaseDate") or "")[:4],
             "type": album.get("albumType", ""), "requestable": True,
@@ -532,15 +592,46 @@ def missing_albums(nd_artist_id: str) -> dict:
             # it survives a cleared browser, and it is the same answer on every
             # device — which a note kept in one browser's storage is not.
             "requested": bool(album.get("monitored")),
-        }
-        if is_owned(album["title"]):
+        }))
+
+    # Pair each catalogue album with the copy on the shelf, exact titles first.
+    # The prefix rule exists for edition suffixes, and it is greedy: "Ultra
+    # Vomit" — MusicBrainz's name for the 1999 demo — is a prefix of "Ultra
+    # Vomit et le pouvoir de la puissance", so on a single pass the demo claimed
+    # the 2024 album and the button on that tile would have gone looking for the
+    # wrong record. Letting exact matches take their copy first, and letting no
+    # copy be claimed twice, keeps the pairing honest.
+    claimed: dict[str, dict] = {}
+    for _, entry in entries:
+        key = norm_title(entry["title"])
+        if key in owned_ids and key not in claimed:
+            claimed[key] = entry
+    for _, entry in entries:
+        if entry.get("ndId"):
+            continue
+        matched = owned_match(owned, entry["title"])
+        if matched is not None and claimed.get(matched) in (None, entry):
+            claimed[matched] = entry
+            entry["ndId"] = owned_ids[matched]
+    for key, entry in claimed.items():
+        entry["ndId"] = owned_ids[key]
+
+    requestable, held = {}, []
+    for album, entry in entries:
+        if entry.get("ndId"):
             # Owned is not the same as finished. A record held only as MP3 can
             # still be asked for, and the panel cannot ask without an id — so
             # the ones already on the shelf are named too, and whoever draws
-            # them decides which are worth offering to improve.
+            # them decides which are worth offering to improve. Every type
+            # belongs here: a demo held as a 160 kbps rip is still worth
+            # offering to replace, even though nobody would call it a gap.
             held.append(entry)
-        else:
-            requestable[norm_title(album["title"])] = entry
+        elif is_studio(album):
+            # A gap in a collection is a studio album. Singles, live records
+            # and demos are catalogued so the ones already owned can carry a
+            # badge, but listing them as missing would bury the four records
+            # that actually are under forty that never were.
+            requestable[norm_title(entry["title"])] = entry
     missing = dict(requestable)
 
     # Discogs lists records MusicBrainz has never heard of — this band's 2017
