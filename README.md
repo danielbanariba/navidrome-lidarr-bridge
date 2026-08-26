@@ -2,7 +2,8 @@
 
 Star an artist in Navidrome and Lidarr starts monitoring them. Open an artist
 page and the albums you are missing appear greyed out in the grid, each with a
-button that asks Lidarr to go find it.
+button that asks Lidarr to go find it — and the ones you already hold in a lossy
+format carry a badge saying so, with a button that asks for a better copy.
 
 ![Architecture](docs/architecture.png)
 
@@ -47,6 +48,8 @@ But unrelated bands sharing a name do not share a back catalogue. Holding
 Honduran metal band — and nothing else comes close. So each candidate's
 discography is fetched from MusicBrainz and compared against what the library
 already holds; the one that overlaps wins.
+
+![How the band is identified](docs/identity.svg)
 
 **Being the only match is not the same as being the right band.** That check
 first ran only when several artists shared a name, so a single match was taken
@@ -124,9 +127,15 @@ Lidarr still picks the change up on its own six-hour refresh.
 | `/artists.json`   | the list Lidarr consumes (also served at `/`)       | `503` until the first successful sync |
 | `/status`         | last sync, counts, unresolved names + candidates    | `503` when the last sync failed       |
 | `/sync`           | force a refresh now (`GET` or `POST`)               | `500` if that refresh fails           |
-| `/missing?id=`    | albums an artist is missing, by Navidrome artist id | `502` if either service is unreachable |
+| `/missing?id=`    | what an artist is missing, and what is held, by Navidrome artist id | `502` if either service is unreachable |
 | `/request`        | `POST {"albumId"\|"mbid"}` — monitor it and search   | `404` if Lidarr has no such album     |
 | `/panel.user.js`  | the userscript that draws the panel in Navidrome    | `404` if the file is missing          |
+
+`/missing` answers with two lists. `missing` is the gap — studio albums the
+library does not hold — and `held` is everything it does, each entry carrying
+the Lidarr album id, the MusicBrainz release-group id, the Navidrome album id it
+was paired with, and whether it has already been requested. A caller can then
+badge a lossy copy and offer to improve it without asking a second question.
 
 `/request` takes either a Lidarr album id or a MusicBrainz release-group id.
 Lidarr stores that release-group id as `foreignAlbumId`, so a caller that
@@ -200,17 +209,87 @@ as entirely missing — for one artist here Lidarr reported 13 missing albums
 while 11 of them sat in the library in FLAC. So `/missing` diffs Lidarr's
 discography against what Navidrome actually holds, and Navidrome wins.
 
-Titles are compared with case, punctuation and parenthesised edition notes
-stripped, since one side reports file tags and the other reports MusicBrainz.
+Titles are compared with case, punctuation, accents and parenthesised edition
+notes stripped, since one side reports file tags and the other reports
+MusicBrainz. Abbreviations are folded too — `M.` and `Mr`, `St.` and `Saint`,
+`&` and `and` — because a difference of one character is not a different record,
+and `Mr Patate` on disk against `M. Patate` in the catalogue had one album
+listed as both owned and missing at the same time.
+
+A bracketed group counts as an edition note only when it stands on its own. One
+written inside a word is part of the title: stripping it turned `Pussy(De)Luxe`
+into `pussy luxe` while the same record spelled `Pussy De Luxe` became `pussy de
+luxe`, so one album appeared twice in the missing list and was offered for
+download twice.
+
+Splits are compared without regard to order, and only splits. Two acts share the
+sleeve and no two catalogues write them the same way — the library here holds
+`Mizar vs Spasm` where MusicBrainz has `Spasm / Mizar`, the same record reversed
+— so the slash survives normalisation as the word it means and a title naming
+more than one act is compared as an unordered set of parts. An ordinary album is
+never compared that way: matching without regard to order is looser than
+matching by string, and it is safe only where the order carries no meaning.
+
 That also collapses a `(Live)` variant onto the studio album of the same name,
 which can hide a live release — the safe direction, since the cost is a missing
 suggestion rather than re-downloading something already owned.
+
+Pairing runs once, exactly, and one-to-one. The prefix rule that lets
+`Raping Uranus: The Lost Tracks Of Alien Fucker` satisfy plain `Raping Uranus`
+is greedy, and greed across two genuinely different records is dangerous:
+MusicBrainz files Ultra Vomit's 1999 demo as `Ultra Vomit`, which is a prefix of
+their 2024 album `Ultra Vomit et le pouvoir de la puissance`. On a single pass
+the demo claimed the album, and a request from that cover would have gone
+looking for the wrong record. Exact titles take their copy first, no copy is
+claimed twice, and each answer carries the Navidrome album id it was paired
+with — so the browser never has to match titles a second time.
 
 `/artists.json` answers `503` rather than an empty `200` while Navidrome has
 never been reached: an empty list means "nothing is starred", which is a very
 different statement from "the source is down". `/status` drives the container
 `HEALTHCHECK`, so a service whose syncs keep failing reports `unhealthy`
 instead of looking fine forever.
+
+### Owning an album is not the same as being done with it
+
+A missing album is easy to see: there is a gap in the grid. A record held as a
+160 kbps rip looks exactly like a record held in 24-bit FLAC, so nobody ever
+goes looking for a better copy of it — the shelf gives no reason to.
+
+So `/missing` names the albums the library *does* hold as well, with the Lidarr
+id needed to act on each one. The panel puts a small badge on any cover whose
+files are lossy — `MP3 192`, `MP3 320` — and a button over it that asks for a
+lossless copy. Nothing is promised: if a better release turns up it replaces the
+old one, and if it does not, the copy already there is untouched.
+
+Whether the button appears is a question of catalogue, not of quality. Lidarr
+can only act on an album it holds an id for, and its metadata profile decides
+what it holds. The default profile allows one primary type and one secondary —
+studio albums — so a demo, an EP or a live set sitting in the library in 160 kbps
+was invisible to it: the badge appeared, correctly, and there was nothing to
+press. Widening the profile to every type fixes that, and the missing list
+filters instead, so a single is catalogued and can carry a badge without ever
+being reported as a gap.
+
+Widening a profile is not free, and the order matters. Lidarr monitors newly
+discovered albums according to each artist's `monitorNewItems`, so a wider
+profile on `all` would have monitored an entire back catalogue at once. Setting
+every artist to `new` first means only genuinely future releases are picked up
+automatically, and everything the widening reveals lands unmonitored — visible,
+badgeable, and downloaded only when somebody presses the button.
+
+### A request has to survive a reload
+
+The first version of the button remembered what had been asked for in the
+browser's own storage. That is the wrong place for it: clearing the browser
+forgets it, a second device never knew, and a request made on a phone was
+invisible on a laptop.
+
+Lidarr already records the same fact, and records it better. An album monitored
+with nothing on disk is precisely an album somebody asked for and Lidarr is
+still looking for, so `/missing` reports `requested` from Lidarr's own
+`monitored` flag. The answer is the same on every device, and it is still there
+after the browser is wiped.
 
 ## Ending the guesswork: `tools/tag-mbids.py`
 
@@ -285,8 +364,12 @@ ranked below the MP3 already held, and therefore never taken as an upgrade. That
 is the right call from Lidarr: it cannot prove any of them is better. The one
 with 39 seeders was MP3.
 
-The only way to know what a release is, is to look. `best-release.py` auditions
-several candidates at once and keeps the best, checking cheapest first:
+The only way to know what a release is, is to look.
+
+![How a release is auditioned](docs/audition.svg)
+
+`best-release.py` auditions several candidates at once and keeps the best,
+checking cheapest first:
 
 1. **The torrent's own file list**, which costs no download at all and rules out
    everything carrying no lossless file.
