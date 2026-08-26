@@ -499,15 +499,22 @@ def missing_albums(nd_artist_id: str) -> dict:
 
     overrides, _ = _read_overrides()
     mbid = overrides.get(name) or _load(CACHE_PATH, {}).get(name)
-    if not mbid:
-        return {"artist": name, "monitored": False, "owned": len(owned), "missing": [],
-                "hint": "not monitored yet — star this artist in Navidrome"}
 
-    match = next((a for a in lidarr_get("/api/v1/artist")
-                  if a.get("foreignArtistId") == mbid), None)
+    catalogue = lidarr_get("/api/v1/artist")
+    match = next((a for a in catalogue if a.get("foreignArtistId") == mbid), None) if mbid else None
+    if match is None:
+        # An artist can be in Lidarr without ever having been starred: pressing
+        # Request on one imports it on the spot. Looking only in the starred
+        # cache then answered "not monitored yet" about an artist Lidarr was
+        # already holding and searching for — and hid, from the one page that
+        # should show it, the fact that those albums had been asked for.
+        match = next((a for a in catalogue
+                      if norm_title(a.get("artistName", "")) == norm_title(name)), None)
+
     if match is None:
         return {"artist": name, "monitored": False, "owned": len(owned), "missing": [],
-                "hint": "starred, but Lidarr has not imported it yet"}
+                "hint": ("starred, but Lidarr has not imported it yet" if mbid
+                         else "not monitored yet — star this artist in Navidrome")}
 
     # Lidarr's catalogue is what can actually be requested, because everything
     # it does is keyed on MusicBrainz ids.
@@ -520,6 +527,11 @@ def missing_albums(nd_artist_id: str) -> dict:
             # The release-group id, so a caller can fetch cover art for an
             # album nobody owns a copy of.
             "mbid": album.get("foreignAlbumId"),
+            # Monitored with nothing on disk means somebody asked for this and
+            # Lidarr is still looking. That is the honest record of a request:
+            # it survives a cleared browser, and it is the same answer on every
+            # device — which a note kept in one browser's storage is not.
+            "requested": bool(album.get("monitored")),
         }
         if is_owned(album["title"]):
             # Owned is not the same as finished. A record held only as MP3 can
