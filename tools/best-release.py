@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import functools
 import base64
 import hashlib
 import json
@@ -51,6 +52,12 @@ try:
     import numpy as np
 except ImportError:
     sys.exit("needs numpy: pip install numpy")
+
+# An audition takes minutes and prints as it goes, which is the only way to see
+# where it is. Redirected to a file — which is how a batch of these runs — the
+# default buffering held every line until the process ended, so a run that was
+# working looked identical to one that had hung.
+print = functools.partial(print, flush=True)  # noqa: A001 - deliberate shadow
 
 LIDARR_URL = os.environ.get("LIDARR_URL", "http://localhost:8686").rstrip("/")
 LIDARR_API_KEY = os.environ.get("LIDARR_API_KEY", "")
@@ -199,7 +206,20 @@ def bdecode(data: bytes, i: int = 0):
 
 
 class _KeepMagnet(urllib.request.HTTPRedirectHandler):
-    """Stop at a redirect that leaves HTTP behind, and keep where it pointed."""
+    """Stop at a redirect that leaves HTTP behind, and keep where it pointed.
+
+    This alone was not enough, and the way it failed was silent. urllib checks
+    the scheme of a redirect target inside http_error_302 and raises before it
+    ever calls redirect_request, so for a magnet this hook never ran and the
+    attribute it sets was never there to read. Every release from an indexer
+    that answers with a redirect — which is most of them — came back with no
+    torrent, no magnet and therefore no id, so its file list could not be read
+    and it was judged on its name. An audition that exists to look inside was
+    looking at nothing.
+
+    The magnet is on the exception, so fetch_release reads it from there. The
+    hook stays because it is correct for anything urllib does route through it.
+    """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if newurl.startswith("magnet:"):
@@ -230,6 +250,15 @@ def fetch_release(url: str) -> tuple[bytes | None, str]:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         return opener.open(req, timeout=60).read(), url
+    except urllib.error.HTTPError as exc:
+        # urllib refuses a redirect whose scheme it does not serve, and reports
+        # the target it refused. That target is the magnet.
+        for target in (getattr(exc, "url", "") or "",
+                       exc.headers.get("Location", "") if exc.headers else "",
+                       getattr(handler, "magnet", "") or ""):
+            if target.startswith("magnet:"):
+                return None, target
+        return None, getattr(handler, "magnet", url)
     except Exception:
         return None, getattr(handler, "magnet", url)
 
@@ -354,7 +383,12 @@ def probe_magnets(candidates: list[dict], title: str, limit: int) -> None:
     moves, and afterwards every candidate can be judged on what it actually
     contains rather than on its name.
     """
-    unknown = [c for c in candidates if c.get("_files") is None and c.get("_hash")]
+    # Not the ones already opened. A magnet that never answered will not answer
+    # the second time either, and a round that re-opens the same dead swarms
+    # spends its whole timeout learning nothing while releases nobody has looked
+    # at yet wait behind them.
+    unknown = [c for c in candidates
+               if c.get("_files") is None and c.get("_hash") and not c.get("_probed")]
     # Seeders alone put the fourteen most popular Alice Cooper torrents at the
     # front, not one of which was the album asked for. The name is a weak signal
     # and it is why the file list is being read at all — but it is the only
@@ -383,20 +417,34 @@ def probe_magnets(candidates: list[dict], title: str, limit: int) -> None:
               "stopCondition": "MetadataReceived"}
     added = []
     for cand in need:
+        cand["_probed"] = True
         try:
             qbt_add(cand.get("_raw"), cand.get("_link") or "", fields)
             added.append(cand)
         except Exception:
             continue
 
+    # The full wait is for the ones that might still answer. A swarm with nobody
+    # in it will not produce metadata in the next two minutes any more than it
+    # did in the last one, so once every torrent still pending is alone the wait
+    # is over. Sitting out the deadline anyway cost three minutes an album, and
+    # a batch of twenty spent an hour of it waiting on nothing.
+    #
+    # The grace period matters: a torrent has to find the swarm before it can
+    # report anybody in it, and one judged at four seconds looks exactly like
+    # one that is genuinely deserted.
     deadline = time.time() + 180
+    grace = time.time() + 45
     pending = {c["_hash"]: c for c in added}
     while pending and time.time() < deadline:
         time.sleep(6)
+        alive = 0
         for torrent in qbt(f"/torrents/info?tag={PROBE_TAG}"):
             cand = pending.get(torrent["hash"].lower())
             if cand is None:
                 continue
+            if (torrent.get("num_seeds") or 0) or (torrent.get("num_leechs") or 0):
+                alive += 1
             try:
                 listing = qbt(f"/torrents/files?hash={torrent['hash']}")
             except Exception:
@@ -409,6 +457,11 @@ def probe_magnets(candidates: list[dict], title: str, limit: int) -> None:
             cand["_kind"] = classify(cand["_ext"])
             cand["_want"] = wanted_indexes(names, title)
             pending.pop(torrent["hash"].lower(), None)
+        if pending and not alive and time.time() > grace:
+            print(f"\r  {len(added) - len(pending)}/{len(added)} read — "
+                  f"the remaining {len(pending)} have nobody seeding them"
+                  f"{' ' * 20}")
+            break
         left = int(deadline - time.time())
         print(f"\r  {len(added) - len(pending)}/{len(added)} read, {left}s left    ",
               end="", flush=True)
@@ -798,7 +851,8 @@ def find_album(args) -> dict:
             "artist": match["artistName"], "mbid": album.get("foreignAlbumId")}
 
 
-def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list[dict]:
+def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14,
+              max_probe: int = 60) -> list[dict]:
     """Candidates worth auditioning, chosen by what they contain.
 
     Two searches, because a torrent is not always one album. The album is often
@@ -848,7 +902,36 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list
     # The name is a weak signal but it is the only one available before the
     # metadata arrives, so it decides which magnets are worth opening.
     candidates.sort(key=lambda r: -(r.get("seeders") or 0))
-    probe_magnets(candidates, album["title"], probe)
+
+    # Keep reading file lists until enough lossless releases have been found, or
+    # until there is nothing left unread.
+    #
+    # A fixed batch was a sample, and popularity is not quality: among a hundred
+    # results three may be the flac and none of them need be popular. Reading
+    # fourteen and stopping meant an album that exists in flac was auditioned as
+    # mp3 — not because the flac lost, but because it was never looked at.
+    #
+    # This is affordable because reading costs no bandwidth and barely any time:
+    # the magnets in a round are opened together and share one timeout, so a
+    # second round costs another wait rather than another download.
+    read = 0
+    while True:
+        before = sum(1 for c in candidates if c.get("_kind") == "lossless")
+        if before >= want:
+            break
+        unread = [c for c in candidates
+                  if c.get("_files") is None and c.get("_hash") and not c.get("_probed")]
+        if not unread or read >= max_probe:
+            break
+        probe_magnets(candidates, album["title"], min(probe, max_probe - read))
+        after = sum(1 for c in candidates if c.get("_kind") == "lossless")
+        read += probe
+        still = [c for c in candidates
+                 if c.get("_files") is None and c.get("_hash") and not c.get("_probed")]
+        print(f"  lossless so far: {after}/{want}"
+              + (f" — {len(still)} release(s) still unread" if still else " — nothing left to read"))
+        if after == before and not still:
+            break
 
     # A candidate has to be able to be this album. Widening the search to the
     # artist alone removed the guarantee the narrow search gave for free: every
@@ -883,13 +966,33 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14) -> list
     rank = {"lossless": 0, "unknown": 1, "lossy": 2, "empty": 3}
     kept.sort(key=lambda r: (rank[r["_kind"]], bool(r.get("_want")),
                              -(r.get("seeders") or 0)))
-    picked = [c for c in kept if c["_kind"] != "empty"][:want]
+    usable = [c for c in kept if c["_kind"] != "empty"]
+    # A release proven lossless beats one proven lossy, and the proof is already
+    # in hand — so there is nothing to learn from downloading the mp3 as well.
+    # Filling the remaining slots with lossy copies spent bandwidth to confirm
+    # what the file list had already said.
+    lossless = [c for c in usable if c["_kind"] == "lossless"]
+    picked = (lossless if lossless else usable)[:want]
 
     print(f"\n  auditioning {len(picked)} of {len(candidates)}: "
           f"{dead} with too few seeders, {vinyl} vinyl rips, "
           f"{missing} read and lacking this album, "
           f"{unrelated} neither named for it nor opened, "
-          f"{max(0, len(kept) - len(picked))} ranked out\n")
+          f"{max(0, len(kept) - len(picked))} ranked out")
+    # Say which of the two situations this is. "Auditioning 1" reads like a
+    # thin search when the truth may be that one lossless copy exists and it
+    # was found; and when none was found, that is worth stating outright rather
+    # than leaving somebody to infer it from a list of mp3s.
+    unread = sum(1 for c in candidates if c.get("_files") is None)
+    if lossless:
+        print(f"  {len(lossless)} proven lossless"
+              + (f", wanted {want}" if len(lossless) < want else "")
+              + (f" — {unread} release(s) never read" if unread else " — every release read"))
+    else:
+        print(f"  no lossless copy found in {len(candidates)} release(s)"
+              + (f" ({unread} never read)" if unread else " — every one was read")
+              + ". Auditioning the best lossy instead.")
+    print()
     for rel in picked:
         note = ""
         if rel.get("_want"):
@@ -953,8 +1056,11 @@ def main() -> None:
                     help="actually download; without it only the free file-list pass runs")
     ap.add_argument("--wait", type=int, default=45, help="minutes to wait (default 45)")
     ap.add_argument("--probe", type=int, default=14,
-                    help="how many magnets to open for their file list (default 14). "
+                    help="how many magnets to open per round (default 14). "
                          "Metadata only — no album content is fetched.")
+    ap.add_argument("--max-probe", type=int, default=60,
+                    help="stop reading file lists after this many (default 60). "
+                         "Rounds run until enough lossless releases are found.")
     ap.add_argument("--min-seeders", type=int, default=1,
                     help="ignore releases with fewer seeders than this (default 1)")
     ap.add_argument("--keep-losers", action="store_true",
@@ -970,7 +1076,8 @@ def main() -> None:
     album = find_album(args)
     print(f"\n  {album['artist']} — {album['title']}\n")
 
-    picked = shortlist(album, args.candidates, args.min_seeders, args.probe)
+    picked = shortlist(album, args.candidates, args.min_seeders, args.probe,
+                       args.max_probe)
     if not picked:
         sys.exit("  nothing worth auditioning")
 
