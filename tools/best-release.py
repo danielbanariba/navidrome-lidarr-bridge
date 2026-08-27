@@ -851,23 +851,25 @@ def find_album(args) -> dict:
             "artist": match["artistName"], "mbid": album.get("foreignAlbumId")}
 
 
-def disabled_indexers() -> list[str]:
-    """Indexers Prowlarr has taken out of service, by name.
+def indexer_health() -> tuple[list[str], int]:
+    """Which indexers are out of service, and how many exist at all.
 
-    Asked only when a search comes back empty, because that is the one moment
-    the difference matters: an indexer that is not being asked cannot tell you
-    the release is not there.
+    Both numbers, because one alone decides nothing. An empty search with every
+    indexer down means the question was never asked; the same empty search with
+    six of seven answering is a real answer about the music, and recording it as
+    unasked leaves the album coming back around forever.
     """
     if not PROWLARR_API_KEY:
-        return []
+        return [], 0
     try:
         head = {"X-Api-Key": PROWLARR_API_KEY}
         names = {i["id"]: i.get("name", str(i["id"]))
                  for i in _json(f"{PROWLARR_URL}/api/v1/indexer", head)}
-        return [names.get(s.get("indexerId"), str(s.get("indexerId")))
+        down = [names.get(s.get("indexerId"), str(s.get("indexerId")))
                 for s in _json(f"{PROWLARR_URL}/api/v1/indexerstatus", head)]
+        return down, len(names)
     except Exception:
-        return []
+        return [], 0
 
 
 def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14,
@@ -897,11 +899,19 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14,
         # the indexers' rate limits; Prowlarr disabled them, and every album
         # after that reported "no lossless copy found" — which read as an answer
         # about the music when it was an answer about the search.
-        down = disabled_indexers()
-        if down:
-            print(f"  NOTHING WAS SEARCHED: {len(down)} indexer(s) disabled by "
+        down, total = indexer_health()
+        if down and len(down) >= total:
+            print(f"  NOTHING WAS SEARCHED: every indexer is disabled by "
                   f"Prowlarr — {', '.join(down)}.")
             print("  This says nothing about whether a better copy exists.\n")
+        elif down:
+            # Some answered, so this IS an answer — a narrower one. Calling it
+            # "nothing was searched" because a single indexer is out means an
+            # album whose result is genuinely empty is recorded as unasked and
+            # comes back around forever, and one permanently banned indexer is
+            # enough to stop the queue converging at all.
+            print(f"  {total - len(down)} of {total} indexer(s) answered and none "
+                  f"had this release. Out of service: {', '.join(down)}.\n")
         else:
             print("  Every indexer answered and none had this release.\n")
         return []
