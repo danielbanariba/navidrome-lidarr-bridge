@@ -1,0 +1,23 @@
+[Unit]
+Description=Audition one lossy album for a better copy
+Documentation=https://github.com/danielbanariba/navidrome-lidarr-bridge
+# The audition talks to Lidarr, Prowlarr and qBittorrent over the network, and
+# a run that starts before they answer records "nothing was searched" about an
+# album that was never asked about.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/servarr/navidrome-lidarr-bridge
+# The .env is sourced by the wrapper rather than by systemd. EnvironmentFile is
+# read immediately before the process starts and so overrides Environment=
+# whatever order they appear in here — and that file is written for the bridge,
+# which reaches its neighbours by container name. From the host those names do
+# not resolve, and every run died on DNS before it asked anything.
+ExecStart=%h/servarr/navidrome-lidarr-bridge/tools/audit-once.sh
+# Longer than the audition's own timeout, so systemd never kills a run that is
+# still cleaning up after itself and leaves probe torrents behind.
+TimeoutStartSec=2100
+Nice=10
+IOSchedulingClass=idle

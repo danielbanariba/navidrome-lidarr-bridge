@@ -553,6 +553,43 @@ here would delete files somebody may still want.
 `GET` or `POST /reap` runs the check now instead of waiting for the loop, and
 `/status` reports the last time it dropped anything.
 
+## Asking the question on its own: `tools/audit-queue.py`
+
+`best-release.py` answers "is there a better copy of this?" and somebody has to
+ask it, album by album. That was the one part of this system a person still had
+to drive, and it is the part they most want driven: a library gains a
+badly-encoded record now and then and nobody notices, because a 128 kbps rip
+looks exactly like a 24-bit master on the shelf.
+
+```
+tools/audit-once.sh              # audition the most overdue album
+tools/audit-once.sh --dry-run    # name it and stop
+tools/audit-once.sh --status     # what has been asked, and what came back
+```
+
+One album per run, worst encoding first, recorded in `audited.json` so the next
+run takes another. `systemd/` holds a timer that fires every half hour; installed
+under `~/.config/systemd/user/`, a library of ninety lossy albums is covered in
+under two days and afterwards only has to keep up with what arrives.
+
+**The pace is the point, not a compromise.** Twenty auditions run back to back
+tripped the indexers' rate limits, Prowlarr disabled two of them, and every
+answer after that was "no better copy" about a search that never happened.
+
+For the same reason an album is asked about again after `AUDIT_RETRY_DAYS`: the
+answer expires. The one release proven to hold an album here in flac had five
+seeders when its file list was read and none an hour later, which is not "no
+flac exists" but "nobody was sharing it just then".
+
+A run that could not reach an indexer is recorded as unanswered rather than as
+a verdict, so the album comes back around instead of being taken as settled.
+
+The tools run on the host rather than in the bridge's container, which carries
+neither ffmpeg nor numpy. `audit-once.sh` exists because systemd cannot be told
+to override the `.env`: `EnvironmentFile` is read immediately before the process
+starts and wins over `Environment=` whatever order they appear in, and that file
+names Docker's own hostnames, which do not resolve from the host.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in the Navidrome credentials and the
