@@ -128,7 +128,8 @@ Lidarr still picks the change up on its own six-hour refresh.
 | `/status`         | last sync, counts, unresolved names + candidates    | `503` when the last sync failed       |
 | `/sync`           | force a refresh now (`GET` or `POST`)               | `500` if that refresh fails           |
 | `/missing?id=`    | what an artist is missing, and what is held, by Navidrome artist id | `502` if either service is unreachable |
-| `/request`        | `POST {"albumId"\|"mbid"}` — monitor it and search   | `404` if Lidarr has no such album     |
+| `/request`        | `POST {"albumId"\|"mbid"}` — monitor it and search   | `400` on a malformed body or mbid, `502` if Lidarr cannot be reached or will not carry the album |
+| `/importable?artist=` | whether Lidarr's metadata server carries this artist at all (also `?mbid=` for one release group) | `400` on a malformed id; never `false` on a failed lookup — it answers `{"importable": true, "unknown": true}` |
 | `/panel.user.js`  | the userscript that draws the panel in Navidrome    | `404` if the file is missing          |
 
 `/missing` answers with two lists. `missing` is the gap — studio albums the
