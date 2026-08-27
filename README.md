@@ -279,6 +279,28 @@ every artist to `new` first means only genuinely future releases are picked up
 automatically, and everything the widening reveals lands unmonitored — visible,
 badgeable, and downloaded only when somebody presses the button.
 
+### Lidarr chasing what is already on the shelf
+
+Lidarr only sees its own root folder, so a library organised anywhere else is
+invisible to it. Every album it catalogues and finds no file for reads as
+missing, and it keeps searching indexers for it — forever. On this library that
+was eighty-six of a hundred and forty-six wanted albums: fifty-nine per cent of
+the work spent hunting music that was never gone.
+
+```
+tools/reconcile-monitoring.py            # print a plan, change nothing
+tools/reconcile-monitoring.py --apply    # unmonitor them
+```
+
+Navidrome decides, using the same title rule as everything else here. Nothing is
+deleted and monitoring is one click to restore.
+
+An album somebody actually asked for is exempt, which is the whole reason the
+request record below had to exist first: an upgrade request is by definition a
+request for a record already owned, so without it this tool could not tell a
+deliberate request from a phantom, and cleaning up the phantoms would have
+cancelled the requests.
+
 ### A request has to survive a reload
 
 The first version of the button remembered what had been asked for in the
@@ -286,11 +308,17 @@ browser's own storage. That is the wrong place for it: clearing the browser
 forgets it, a second device never knew, and a request made on a phone was
 invisible on a laptop.
 
-Lidarr already records the same fact, and records it better. An album monitored
-with nothing on disk is precisely an album somebody asked for and Lidarr is
-still looking for, so `/missing` reports `requested` from Lidarr's own
-`monitored` flag. The answer is the same on every device, and it is still there
-after the browser is wiped.
+Lidarr's own `monitored` flag stood in for it, and it cannot: Lidarr monitors an
+album the moment it enters the catalogue, whether or not a human ever wanted it.
+Eighty-six records here were reported as requested that nobody had ever
+requested — and worse, that made the phantoms indistinguishable from the real
+thing, so neither could be cleaned up without losing the other.
+
+So `/request` writes down what it was actually asked to do, in `requested.json`
+in the state volume. `/missing` reads that, and still honours `monitored` for
+anything predating the record, so a request already in flight is never
+forgotten. The answer is the same on every device and survives a wiped browser,
+which a note in one browser's storage does not.
 
 ## Ending the guesswork: `tools/tag-mbids.py`
 

@@ -75,6 +75,13 @@ OVERRIDES_PATH = os.path.join(STATE_DIR, "overrides.json")
 # The set Lidarr was last told about. Persisted so a restart does not look like
 # a change and refresh the list for nothing.
 PUBLISHED_PATH = os.path.join(STATE_DIR, "published.json")
+# Albums somebody actually asked for. Lidarr's monitored flag was standing in
+# for this, and it cannot: Lidarr monitors an album the moment it enters the
+# catalogue, whether or not a human ever wanted it. On this library that made
+# eighty-six records the panel reported as "Requested" that nobody had ever
+# requested — and it made the phantoms indistinguishable from real requests, so
+# neither could be cleaned up without losing the other.
+REQUESTED_PATH = os.path.join(STATE_DIR, "requested.json")
 # The userscript that draws the panel inside Navidrome, served from /panel.user.js.
 PANEL_PATH = os.environ.get("PANEL_PATH", "/app/panel.user.js")
 
@@ -612,6 +619,7 @@ def missing_albums(nd_artist_id: str) -> dict:
 
     # Lidarr's catalogue is what can actually be requested, because everything
     # it does is keyed on MusicBrainz ids.
+    asked = _load(REQUESTED_PATH, {})
     entries = []
     for album in lidarr_get(f"/api/v1/album?artistId={match['id']}"):
         entries.append((album, {
@@ -621,11 +629,15 @@ def missing_albums(nd_artist_id: str) -> dict:
             # The release-group id, so a caller can fetch cover art for an
             # album nobody owns a copy of.
             "mbid": album.get("foreignAlbumId"),
-            # Monitored with nothing on disk means somebody asked for this and
-            # Lidarr is still looking. That is the honest record of a request:
-            # it survives a cleared browser, and it is the same answer on every
-            # device — which a note kept in one browser's storage is not.
-            "requested": bool(album.get("monitored")),
+            # A request this service was actually asked to make, kept in the
+            # state volume: it survives a cleared browser and reads the same on
+            # every device, which a note in one browser's storage does not.
+            #
+            # Lidarr's monitored flag is still honoured for anything predating
+            # that record, so a request already in flight is never forgotten —
+            # but it is no longer the whole answer, because Lidarr monitors
+            # albums nobody asked for and the panel then called them requested.
+            "requested": str(album["id"]) in asked or bool(album.get("monitored")),
         }))
 
     # Pair each catalogue album with the copy on the shelf, exact titles first.
@@ -882,7 +894,27 @@ def request_album(album_id: int) -> dict:
     _post_json(f"{LIDARR_URL}/api/v1/command",
                {"name": "AlbumSearch", "albumIds": [album_id]},
                {"X-Api-Key": LIDARR_API_KEY})
+    remember_request(album_id, album.get("foreignAlbumId"), album.get("title"))
     return {"requested": album.get("title"), "albumId": album_id}
+
+
+def remember_request(album_id: int, mbid: str | None, title: str | None) -> None:
+    """Write down that a person asked for this one.
+
+    Only what came through here counts. Everything else Lidarr monitors, it
+    monitors on its own account, and a tool that cannot tell those apart can
+    neither trust the flag nor clear it.
+
+    A failure to record is logged and swallowed: the album is already monitored
+    and already being searched for, and losing the note is a smaller harm than
+    reporting a request that did happen as if it had failed.
+    """
+    try:
+        seen = _load(REQUESTED_PATH, {})
+        seen[str(album_id)] = {"mbid": mbid, "title": title, "at": int(time.time())}
+        _save(REQUESTED_PATH, seen)
+    except OSError as exc:
+        log.warning("could not record the request for album %s: %s", album_id, exc)
 
 
 def resolve(name: str, nd_artist_id: str | None = None) -> tuple[str | None, str, list[dict]]:
