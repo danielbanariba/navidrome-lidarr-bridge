@@ -62,6 +62,13 @@ DISCOGS_SECRET = os.environ.get("DISCOGS_SECRET", "").strip()
 DISCOGS_MIN_INTERVAL = float(os.environ.get(
     "DISCOGS_MIN_INTERVAL", "1.1" if DISCOGS_KEY and DISCOGS_SECRET else "2.5"))
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", "900"))
+# How long a download may sit without a single byte arriving before it is given
+# up on. Indexers report the seeder count they saw when they indexed, not the
+# one that exists when Lidarr grabs — so a release can pass a seeder threshold
+# and still land in a swarm nobody is left in. Five of six queued downloads here
+# sat at zero bytes for up to twenty-five hours, holding a slot and blocking the
+# album behind them. Zero disables this entirely.
+STALLED_HOURS = float(os.environ.get("STALLED_HOURS", "6"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8687"))
 STATE_DIR = os.environ.get("STATE_DIR", "/state")
 
@@ -82,6 +89,11 @@ PUBLISHED_PATH = os.path.join(STATE_DIR, "published.json")
 # requested — and it made the phantoms indistinguishable from real requests, so
 # neither could be cleaned up without losing the other.
 REQUESTED_PATH = os.path.join(STATE_DIR, "requested.json")
+# How much was left to fetch last time each download was looked at, and when it
+# was first seen at that figure. Progress is what decides a stall, not age: a
+# twenty-gigabyte discography crawling along is working, and a two-megabyte
+# single that has not moved since yesterday is not.
+STALLED_PATH = os.path.join(STATE_DIR, "stalled.json")
 # The userscript that draws the panel inside Navidrome, served from /panel.user.js.
 PANEL_PATH = os.environ.get("PANEL_PATH", "/app/panel.user.js")
 
@@ -452,6 +464,17 @@ def _post_json(url: str, body: object, headers: dict | None = None) -> object:
 
 def _put_json(url: str, body: object, headers: dict | None = None) -> object:
     return _send_json(url, body, "PUT", headers)
+
+
+def _delete(url: str, headers: dict | None = None) -> None:
+    """A DELETE whose reply is not worth reading.
+
+    Lidarr answers an empty body here, and json.load on nothing raises — which
+    would report a removal that worked as a failure.
+    """
+    req = urllib.request.Request(url, headers=headers or {}, method="DELETE")
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        resp.read()
 
 
 # Resolved once per process: the id only changes if the list is recreated.
@@ -1025,6 +1048,7 @@ class State:
         self.last_sync: str | None = None
         self.last_error: str | None = None
         self.last_push: str | None = None
+        self.last_reap: str | None = None
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -1034,6 +1058,7 @@ class State:
                 "last_sync": self.last_sync,
                 "last_error": self.last_error,
                 "last_push": self.last_push,
+                "last_reap": self.last_reap,
                 # A failed push is not unhealthy: Lidarr still refreshes on its own.
                 "healthy": self.last_sync is not None and self.last_error is None,
             }
@@ -1167,6 +1192,64 @@ def _sync_locked() -> None:
         STATE.last_push = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {outcome}"
 
 
+def reap_stalled() -> dict:
+    """Give up on downloads that have stopped moving, and let Lidarr try again.
+
+    Age alone is a bad test — a large release legitimately takes hours — so what
+    is measured is progress. A download whose remaining bytes have not changed
+    for STALLED_HOURS is not slow, it is stuck: nobody in the swarm has the
+    data, and no amount of waiting produces it.
+
+    Removed with the release blocklisted, so Lidarr does not immediately grab
+    the same dead copy again, and with a fresh search asked for, so the album
+    stays wanted rather than quietly disappearing.
+
+    Anything already fully downloaded is left alone. A finished download that
+    will not import is a different failure with a different cause, and guessing
+    at it here would delete files somebody may still want.
+    """
+    if STALLED_HOURS <= 0:
+        return {"reaped": [], "watching": 0, "disabled": True}
+
+    queue = lidarr_get("/api/v1/queue?pageSize=500&includeAlbum=true")
+    seen = _load(STALLED_PATH, {})
+    now = time.time()
+    fresh: dict[str, dict] = {}
+    reaped: list[dict] = []
+
+    for item in queue.get("records", []):
+        key = str(item.get("downloadId") or item.get("id"))
+        left = item.get("sizeleft") or 0
+        if left <= 0:
+            # Finished. Whatever is wrong with it, it is not a stall.
+            continue
+        before = seen.get(key)
+        if before and before.get("left") == left:
+            since = before.get("since", now)
+        else:
+            since = now
+        fresh[key] = {"left": left, "since": since}
+
+        if now - since < STALLED_HOURS * 3600:
+            continue
+        title = (item.get("album") or {}).get("title") or item.get("title") or "?"
+        try:
+            _delete(f"{LIDARR_URL}/api/v1/queue/{item['id']}"
+                    "?removeFromClient=true&blocklist=true&skipRedownload=false",
+                    {"X-Api-Key": LIDARR_API_KEY})
+        except FETCH_ERRORS as exc:
+            log.warning("could not drop stalled download %s: %s", title, exc)
+            continue
+        fresh.pop(key, None)
+        hours = (now - since) / 3600
+        reaped.append({"album": title, "stalled_hours": round(hours, 1)})
+        log.info("dropped %r after %.1f h without a byte", title, hours)
+
+    # Anything no longer in the queue is no longer this function's business.
+    _save(STALLED_PATH, fresh)
+    return {"reaped": reaped, "watching": len(fresh), "disabled": False}
+
+
 def sync_loop() -> None:
     while True:
         try:
@@ -1175,6 +1258,16 @@ def sync_loop() -> None:
             log.error("sync failed: %s", exc)
             with STATE.lock:
                 STATE.last_error = str(exc)
+        try:
+            outcome = reap_stalled()
+            if outcome["reaped"]:
+                with STATE.lock:
+                    STATE.last_reap = (f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} "
+                                       f"dropped {len(outcome['reaped'])}")
+        except Exception as exc:
+            # A queue that cannot be read is not a reason to stop publishing the
+            # artist list, which is this service's actual job.
+            log.warning("could not check for stalled downloads: %s", exc)
         time.sleep(REFRESH_SECONDS)
 
 
@@ -1346,6 +1439,13 @@ class Handler(BaseHTTPRequestHandler):
         # not healthy, however long it has been answering requests.
         self._respond(snapshot, 200 if snapshot["healthy"] else 503)
 
+    def _reap(self) -> None:
+        """Check for stalled downloads now, rather than waiting for the loop."""
+        try:
+            self._respond(reap_stalled())
+        except FETCH_ERRORS as exc:
+            self._respond({"error": f"could not read Lidarr's queue: {exc}"}, 502)
+
     def _sync(self) -> None:
         try:
             sync()
@@ -1367,6 +1467,8 @@ class Handler(BaseHTTPRequestHandler):
             self._sync()
         elif path == "/missing":
             self._missing(urllib.parse.parse_qs(parsed.query))
+        elif path == "/reap":
+            self._reap()
         elif path == "/importable":
             self._importable(urllib.parse.parse_qs(parsed.query))
         elif path == "/panel.user.js":
@@ -1380,6 +1482,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path == "/sync":
             self._sync()
+        elif path == "/reap":
+            self._reap()
         elif path == "/request":
             self._request()
         else:
