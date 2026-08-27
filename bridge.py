@@ -707,13 +707,59 @@ def importlist_defaults() -> dict:
     """
     list_id = importlist_id()
     for item in lidarr_get("/api/v1/importlist"):
-        if item.get("id") == list_id:
-            return {
-                "qualityProfileId": item["qualityProfileId"],
-                "metadataProfileId": item["metadataProfileId"],
-                "rootFolderPath": item["rootFolderPath"],
-            }
+        if item.get("id") != list_id:
+            continue
+        # Named rather than subscripted. A raw KeyError here is not a fetch
+        # error, so it escapes the request handler entirely and drops the
+        # connection — the panel sees a dead socket for a list that is merely
+        # configured oddly, which is the least informative failure available.
+        missing = [k for k in ("qualityProfileId", "metadataProfileId", "rootFolderPath")
+                   if item.get(k) is None]
+        if missing:
+            raise BridgeError(
+                f"import list {list_id} has no {', '.join(missing)}; "
+                f"set them on the list in Lidarr")
+        return {k: item[k] for k in
+                ("qualityProfileId", "metadataProfileId", "rootFolderPath")}
     raise BridgeError(f"import list {list_id} disappeared")
+
+
+def catalogue_album_or_none(mbid: str) -> dict | None:
+    """What Lidarr's metadata server holds for a MusicBrainz release-group id.
+
+    Lidarr resolves an album's MusicBrainz id to its artist even for artists it
+    has never imported, which is what makes requesting an unknown band possible
+    at all. It is also the only honest way to ask beforehand whether a request
+    can succeed: MusicBrainz lists bands this metadata server has never carried,
+    and for the obscure ones the panel's search is written for, the two
+    catalogues disagree often.
+
+    Shared by the import and by /importable so they cannot drift into
+    disagreeing about what "Lidarr has this" means.
+
+    An empty answer is returned as None rather than raised, because for one of
+    those two callers it is the answer rather than a failure. /importable exists
+    to distinguish "Lidarr does not have this" from "Lidarr could not be asked",
+    and a BridgeError is a member of FETCH_ERRORS: raised here, the one
+    definitive no was caught by the clause meant for transport failures and
+    answered as importable/unknown, so the ?mbid= branch could never say no at
+    all. Only a genuinely failed call raises out of this now.
+    """
+    found = lidarr_get("/api/v1/album/lookup?" + urllib.parse.urlencode({"term": f"lidarr:{mbid}"}))
+    if not isinstance(found, list) or not found:
+        return None
+    return found[0] or {}
+
+
+def catalogue_album(mbid: str) -> dict:
+    """catalogue_album_or_none for the callers that cannot proceed without one."""
+    found = catalogue_album_or_none(mbid)
+    # Read by the panel's requestFailureText, which turns it into "Not in
+    # Lidarr" on the button itself — reword it there too, or it degrades to a
+    # bare "Failed" with this sentence hidden in a tooltip.
+    if found is None:
+        raise BridgeError(f"no album in Lidarr's catalogue for {mbid}")
+    return found
 
 
 def import_artist_for(mbid: str) -> int:
@@ -727,10 +773,8 @@ def import_artist_for(mbid: str) -> int:
     that was actually requested. Adding with the usual "all" would queue the
     entire discography off a single click.
     """
-    found = lidarr_get("/api/v1/album/lookup?" + urllib.parse.urlencode({"term": f"lidarr:{mbid}"}))
-    if not isinstance(found, list) or not found:
-        raise BridgeError(f"no album in Lidarr's catalogue for {mbid}")
-    artist = (found[0] or {}).get("artist") or {}
+    artist = catalogue_album(mbid).get("artist") or {}
+    # Also read by the panel's requestFailureText.
     if not artist.get("foreignArtistId"):
         raise BridgeError(f"Lidarr's catalogue has no artist for album {mbid}")
 
@@ -756,6 +800,7 @@ def import_artist_for(mbid: str) -> int:
             if album_id is not None:
                 return album_id
             time.sleep(1)
+        # Read by the panel's requestFailureText ("does not list this release").
         raise BridgeError(
             f"Lidarr holds {held.get('artistName')!r} but does not list this "
             f"release — its metadata profile leaves out singles, bootlegs and "
@@ -775,6 +820,10 @@ def import_artist_for(mbid: str) -> int:
         if album_id is not None:
             return album_id
         time.sleep(1)
+    # Read by the panel's requestFailureText ("has not listed the album yet"),
+    # which shows it as "Still importing…" rather than as a failure. The artist
+    # *is* imported by now, but retrying takes the already-held branch above and
+    # costs another full IMPORT_WAIT_SECONDS, so nothing here retries on its own.
     raise BridgeError(
         f"added {artist.get('artistName')!r}, but Lidarr has not listed the album yet")
 
@@ -820,6 +869,8 @@ def request_album(album_id: int) -> dict:
     # the write and drops the flag. An artist imported on demand arrives
     # unmonitored — that is what keeps its whole discography out of the queue —
     # so the artist has to be lifted before the one requested album can be.
+    # Both "could not keep ... monitored" strings are read by the panel's
+    # requestFailureText, which shows them as "Lidarr is busy".
     artist_id = album.get("artistId") or (album.get("artist") or {}).get("id")
     if artist_id and not ensure_monitored("artist", artist_id):
         raise BridgeError(f"could not keep artist {artist_id} monitored")
@@ -1126,6 +1177,48 @@ class Handler(BaseHTTPRequestHandler):
         except FETCH_ERRORS as exc:
             self._respond({"error": f"{type(exc).__name__}: {exc}"}, 502)
 
+    def _importable(self, query: dict) -> None:
+        """Whether Lidarr's metadata server carries this artist, or this album.
+
+        Asked by the panel's search before it lights up a Request button. Every
+        artist that search reaches is one Lidarr has never imported, and
+        MusicBrainz's catalogue is the wider of the two — so without this the
+        only way to learn the answer is to click and wait out the whole import
+        before being told no.
+
+        ?artist=<artist mbid> is the cheap question and the one the panel asks:
+        one lookup answers for a whole discography. ?mbid=<release-group id>
+        asks about a single record, which is what a request actually needs.
+        """
+        artist_mbid = (query.get("artist") or [""])[0]
+        album_mbid = (query.get("mbid") or [""])[0]
+        if not _is_mbid(artist_mbid or album_mbid):
+            self._respond(
+                {"error": "expected ?artist=<artist id> or ?mbid=<release-group id>"}, 400)
+            return
+        try:
+            if artist_mbid:
+                found = lidarr_lookup(f"lidarr:{artist_mbid}")
+                match = next((a for a in found if isinstance(a, dict)
+                              and a.get("foreignArtistId") == artist_mbid), None)
+            else:
+                # The non-raising form on purpose: an empty lookup is this
+                # branch's whole reason for existing and has to reach the
+                # answer below as a plain no, not be caught underneath as a
+                # failure to ask.
+                match = (catalogue_album_or_none(album_mbid) or {}).get("artist") or None
+                if match and not match.get("foreignArtistId"):
+                    match = None
+        except FETCH_ERRORS as exc:
+            # Not knowing is not the same as "no". This answer greys a row out,
+            # and a lookup that could not run must never grey out a record the
+            # user could in fact have asked for — so it says yes, and says why.
+            self._respond({"importable": True, "unknown": True,
+                           "error": f"{type(exc).__name__}: {exc}"})
+            return
+        self._respond({"importable": match is not None,
+                       "artist": (match or {}).get("artistName")})
+
     def _request(self) -> None:
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1133,28 +1226,51 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._respond({"error": "body is not JSON"}, 400)
             return
+        # Only the shape of the request is judged here, and nothing that talks
+        # to Lidarr. This clause catches ValueError, which FETCH_ERRORS also
+        # contains and which json.JSONDecodeError is a kind of — so with the
+        # Lidarr calls still inside it, a truncated reply from Lidarr or a raw
+        # KeyError out of importlist_defaults answered 400 "expected a JSON body
+        # with albumId or mbid", blaming the browser for the upstream's failure.
+        # The panel's search sends nothing but mbids, which made that misleading
+        # message its default one.
+        album_id = None
+        mbid = None
         try:
             if body.get("albumId") is not None:
                 album_id = int(body["albumId"])
             elif body.get("mbid"):
                 mbid = str(body["mbid"])
+                # A 502 would send someone to look at Lidarr for a problem that
+                # never left the browser. The panel's search is the first thing
+                # here to hand /request ids a person can influence.
+                if not _is_mbid(mbid):
+                    self._respond({"error": f"{mbid!r} is not a MusicBrainz id"}, 400)
+                    return
+            else:
+                raise KeyError("albumId")
+        except (ValueError, KeyError, TypeError, AttributeError):
+            self._respond({"error": "expected a JSON body with albumId or mbid"}, 400)
+            return
+        try:
+            if album_id is None:
                 album_id = album_id_for_mbid(mbid)
                 if album_id is None:
                     # Lidarr only holds albums of artists it imported, and being
                     # sent away to add the artist first is a poor answer to
                     # "fetch me this album". Import it and carry on.
                     album_id = import_artist_for(mbid)
-            else:
-                raise KeyError("albumId")
-        except (ValueError, KeyError, TypeError, AttributeError):
-            self._respond({"error": "expected a JSON body with albumId or mbid"}, 400)
-            return
-        except FETCH_ERRORS as exc:
-            self._respond({"error": f"{type(exc).__name__}: {exc}"}, 502)
-            return
-        try:
             self._respond(request_album(album_id))
         except FETCH_ERRORS as exc:
+            self._respond({"error": f"{type(exc).__name__}: {exc}"}, 502)
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Narrowing the clause above moved KeyError and friends out of it,
+            # which is right — they were answering 400 and blaming the browser
+            # for Lidarr's failures. But nothing else catches them either, and
+            # an exception leaving a handler drops the connection without a
+            # reply, which reaches the panel as a bare network error. Anything
+            # unforeseen still gets to say something.
+            log.exception("unexpected failure serving /request")
             self._respond({"error": f"{type(exc).__name__}: {exc}"}, 502)
 
     def _userscript(self) -> None:
@@ -1219,6 +1335,8 @@ class Handler(BaseHTTPRequestHandler):
             self._sync()
         elif path == "/missing":
             self._missing(urllib.parse.parse_qs(parsed.query))
+        elif path == "/importable":
+            self._importable(urllib.parse.parse_qs(parsed.query))
         elif path == "/panel.user.js":
             self._panel()
         elif path in ("/userscript.js", "/navidrome-missing-albums.user.js"):
