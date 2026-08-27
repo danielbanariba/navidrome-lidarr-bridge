@@ -540,6 +540,12 @@ The release is blocklisted so Lidarr does not immediately grab the same dead
 copy again, and a fresh search is asked for, so the album stays wanted rather
 than quietly disappearing.
 
+Both the total size and the remaining bytes are watched, because a torrent still
+waiting on its metadata reports zero for each — and testing the remaining bytes
+alone reads that as a completed download and skips it forever. Those are exactly
+the ones worth dropping: the five that sat here for up to twenty-five hours had
+never learned what they were supposed to be fetching.
+
 Anything already fully downloaded is left alone. A finished download that will
 not import is a different failure with a different cause, and guessing at it
 here would delete files somebody may still want.
