@@ -1219,16 +1219,22 @@ def reap_stalled() -> dict:
 
     for item in queue.get("records", []):
         key = str(item.get("downloadId") or item.get("id"))
+        size = item.get("size") or 0
         left = item.get("sizeleft") or 0
-        if left <= 0:
+        if size > 0 and left <= 0:
             # Finished. Whatever is wrong with it, it is not a stall.
             continue
+        # Both figures, because a torrent still waiting on its metadata reports
+        # zero for each — and testing the remaining bytes alone read that as a
+        # completed download and skipped it forever. Those are precisely the
+        # ones worth dropping: five sat at zero for up to twenty-five hours,
+        # never having learned what they were supposed to be fetching.
         before = seen.get(key)
-        if before and before.get("left") == left:
+        if before and before.get("size") == size and before.get("left") == left:
             since = before.get("since", now)
         else:
             since = now
-        fresh[key] = {"left": left, "since": since}
+        fresh[key] = {"size": size, "left": left, "since": since}
 
         if now - since < STALLED_HOURS * 3600:
             continue
