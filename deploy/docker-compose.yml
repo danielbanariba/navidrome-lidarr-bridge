@@ -1,0 +1,132 @@
+# The whole thing, from nothing.
+#
+# `docker compose up -d` then `deploy/bootstrap.py` gives a working system: star
+# an artist in Navidrome and Lidarr goes and finds their records.
+#
+# Everything shares one /data root, which is what makes an import a rename
+# rather than a copy — Lidarr writes into the same filesystem Navidrome reads,
+# so an album that finishes downloading is playable seconds later without a
+# gigabyte moving anywhere.
+#
+# Already running Lidarr? Use ../docker-compose.example.yml instead: it adds the
+# bridge to a stack you already have, and this file would fight it for ports.
+
+name: navidrome-lidarr
+
+x-common: &common
+  environment: &env
+    PUID: ${PUID:-1000}
+    PGID: ${PGID:-1000}
+    TZ: ${TZ:-UTC}
+  restart: unless-stopped
+  networks: [music]
+
+services:
+  navidrome:
+    <<: *common
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      ND_MUSICFOLDER: /music
+      ND_DATAFOLDER: /data
+      # The bridge asks Navidrome what is owned, so it has to be able to log in.
+      ND_ENABLESHARING: "false"
+      # Lidarr writes into the music folder from another container. The watcher
+      # notices that within seconds; the scheduled scan is the backstop, and it
+      # decides what to revisit from each directory's timestamp.
+      ND_SCANSCHEDULE: "@every 1h"
+      ND_LOGLEVEL: info
+    volumes:
+      - ./config/navidrome:/data
+      - ${MUSIC_DIR:?set MUSIC_DIR in .env}:/music
+    ports:
+      - "${NAVIDROME_PORT:-4533}:4533"
+
+  lidarr:
+    <<: *common
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    volumes:
+      - ./config/lidarr:/config
+      # The same tree Navidrome reads and qBittorrent writes into, mounted at
+      # the same path in every container. Different paths here is what turns an
+      # import into a copy and then into a duplicate.
+      - ${DATA_DIR:?set DATA_DIR in .env}:/data
+    ports:
+      - "${LIDARR_PORT:-8686}:8686"
+
+  prowlarr:
+    <<: *common
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    volumes:
+      - ./config/prowlarr:/config
+    ports:
+      - "${PROWLARR_PORT:-9696}:9696"
+
+  qbittorrent:
+    <<: *common
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      <<: *env
+      WEBUI_PORT: 8090
+    volumes:
+      - ./config/qbittorrent:/config
+      - ${DATA_DIR:?set DATA_DIR in .env}:/data
+    ports:
+      - "${QBIT_PORT:-8090}:8090"
+      - "6881:6881"
+      - "6881:6881/udp"
+
+  flaresolverr:
+    <<: *common
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      <<: *env
+      LOG_LEVEL: warning
+    ports:
+      - "127.0.0.1:8191:8191"
+
+  bridge:
+    <<: *common
+    build: ..
+    image: navidrome-lidarr-bridge:local
+    container_name: navidrome-lidarr-bridge
+    # Not a LinuxServer image, so PUID/PGID are ignored: set the uid directly to
+    # keep the state volume owned by the host user rather than root.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file: [../.env]
+    environment:
+      <<: *env
+      NAVIDROME_URL: http://navidrome:4533
+      LIDARR_URL: http://lidarr:8686
+      PROWLARR_URL: http://prowlarr:9696
+    volumes:
+      - ../state:/state
+    # Lidarr reaches it by container name; the published port is for local
+    # inspection only, so it stays on loopback.
+    ports:
+      - "127.0.0.1:8687:8687"
+    depends_on: [navidrome, lidarr]
+
+  # Optional, and the reason it exists is worth knowing: Navidrome has no UI
+  # extension point, so the panel is injected into the HTML on its way to the
+  # browser. Everyone gets it, on every device, with nothing installed.
+  # Navidrome keeps serving its own port untouched.
+  panel:
+    <<: *common
+    image: nginx:alpine
+    container_name: navidrome-panel
+    profiles: [panel]
+    volumes:
+      - ../nginx/navidrome-panel.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${PANEL_PORT:-4534}:4534"
+    depends_on: [navidrome, bridge]
+
+networks:
+  music:
+    name: music
