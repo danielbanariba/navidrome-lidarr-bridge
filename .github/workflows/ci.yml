@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The service itself has no dependencies — no requirements.txt and no pip
+      # install in the Dockerfile — and that is worth keeping true. pytest is
+      # the only thing installed here, and only to run the tests.
+      - run: pip install pytest
+      - run: python -m pytest tests/ -q
+
+      # Every tool is executable and every one of them is a syntax error away
+      # from failing at three in the morning inside a systemd timer, where
+      # nobody is watching.
+      - run: python -m compileall -q bridge.py tools/ deploy/
+
+      - name: the compose file is valid
+        run: |
+          MUSIC_DIR=/tmp DATA_DIR=/tmp \
+            docker compose -f deploy/docker-compose.yml config >/dev/null
+
+      - name: the image builds
+        run: docker build -q -t navidrome-lidarr-bridge:ci .
