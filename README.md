@@ -130,6 +130,7 @@ Lidarr still picks the change up on its own six-hour refresh.
 | `/missing?id=`    | what an artist is missing, and what is held, by Navidrome artist id | `502` if either service is unreachable |
 | `/request`        | `POST {"albumId"\|"mbid"}` — monitor it and search   | `400` on a malformed body or mbid, `502` if Lidarr cannot be reached or will not carry the album |
 | `/importable?artist=` | whether Lidarr's metadata server carries this artist at all (also `?mbid=` for one release group) | `400` on a malformed id; never `false` on a failed lookup — it answers `{"importable": true, "unknown": true}` |
+| `/reap`           | drop downloads that have stopped moving (`GET` or `POST`) | `502` if Lidarr's queue cannot be read |
 | `/panel.user.js`  | the userscript that draws the panel in Navidrome    | `404` if the file is missing          |
 
 `/missing` answers with two lists. `missing` is the gap — studio albums the
@@ -519,6 +520,32 @@ the bare title finds them.
 
 The folder is touched after writing, because Navidrome decides what to revisit
 from the directory's timestamp and would otherwise never look inside again.
+
+## Downloads that stop moving
+
+A seeder threshold filters out what is obviously dead, and it is not enough.
+Indexers report the seeder count they saw when they indexed, not the one that
+exists when Lidarr grabs — so a release passes the threshold and still lands in
+a swarm nobody is left in. Five of six queued downloads here sat at zero bytes
+for up to twenty-five hours, each holding a slot and blocking the album behind
+it.
+
+So the sync loop checks the queue, and gives up on anything that has stopped
+moving. What it measures is progress, not age: a twenty-gigabyte discography
+crawling along is working, and a two-megabyte single that has not moved since
+yesterday is not. `STALLED_HOURS` is how long a download may sit without a
+single byte arriving — six by default, and zero turns the whole thing off.
+
+The release is blocklisted so Lidarr does not immediately grab the same dead
+copy again, and a fresh search is asked for, so the album stays wanted rather
+than quietly disappearing.
+
+Anything already fully downloaded is left alone. A finished download that will
+not import is a different failure with a different cause, and guessing at it
+here would delete files somebody may still want.
+
+`GET` or `POST /reap` runs the check now instead of waiting for the loop, and
+`/status` reports the last time it dropped anything.
 
 ## Configuration
 
