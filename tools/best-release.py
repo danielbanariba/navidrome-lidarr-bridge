@@ -851,6 +851,25 @@ def find_album(args) -> dict:
             "artist": match["artistName"], "mbid": album.get("foreignAlbumId")}
 
 
+def disabled_indexers() -> list[str]:
+    """Indexers Prowlarr has taken out of service, by name.
+
+    Asked only when a search comes back empty, because that is the one moment
+    the difference matters: an indexer that is not being asked cannot tell you
+    the release is not there.
+    """
+    if not PROWLARR_API_KEY:
+        return []
+    try:
+        head = {"X-Api-Key": PROWLARR_API_KEY}
+        names = {i["id"]: i.get("name", str(i["id"]))
+                 for i in _json(f"{PROWLARR_URL}/api/v1/indexer", head)}
+        return [names.get(s.get("indexerId"), str(s.get("indexerId")))
+                for s in _json(f"{PROWLARR_URL}/api/v1/indexerstatus", head)]
+    except Exception:
+        return []
+
+
 def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14,
               max_probe: int = 60) -> list[dict]:
     """Candidates worth auditioning, chosen by what they contain.
@@ -872,6 +891,20 @@ def shortlist(album: dict, want: int, min_seeders: int, probe: int = 14,
             seen_guid.add(guid)
             results.append(rel)
     print(f"  {len(results)} results between them\n")
+    if not results:
+        # An empty search and an exhausted one look identical from here, and
+        # they mean opposite things. Twenty auditions run back to back tripped
+        # the indexers' rate limits; Prowlarr disabled them, and every album
+        # after that reported "no lossless copy found" — which read as an answer
+        # about the music when it was an answer about the search.
+        down = disabled_indexers()
+        if down:
+            print(f"  NOTHING WAS SEARCHED: {len(down)} indexer(s) disabled by "
+                  f"Prowlarr — {', '.join(down)}.")
+            print("  This says nothing about whether a better copy exists.\n")
+        else:
+            print("  Every indexer answered and none had this release.\n")
+        return []
 
     seen, candidates, dead, missing, vinyl = set(), [], 0, 0, 0
     for rel in sorted(results, key=lambda r: -(r.get("seeders") or 0)):
