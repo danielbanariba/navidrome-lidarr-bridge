@@ -48,10 +48,23 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-try:
-    import numpy as np
-except ImportError:
-    sys.exit("needs numpy: pip install numpy")
+# Imported where it is used rather than here. A module that kills the process
+# on being read cannot be imported at all — not by a test, not by a sibling
+# tool, not by anything that only wants the file-list logic. numpy is needed to
+# look at a waveform and by nothing else in this file, so that is where it is
+# asked for, and the message is the same when it is genuinely missing.
+np = None
+
+
+def _numpy():
+    global np
+    if np is None:
+        try:
+            import numpy
+        except ImportError:
+            sys.exit("needs numpy: pip install numpy")
+        np = numpy
+    return np
 
 # An audition takes minutes and prints as it goes, which is the only way to see
 # where it is. Redirected to a file — which is how a batch of these runs — the
@@ -528,6 +541,7 @@ def spectral_cutoff(path: str, seconds: int = 40) -> tuple[float | None, float]:
         ["ffmpeg", "-v", "quiet", "-ss", "30", "-t", str(seconds), "-i", path,
          "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"],
         capture_output=True)
+    np = _numpy()
     samples = np.frombuffer(proc.stdout, dtype=np.float32)
     if samples.size < rate * 5:
         return None, 0.0

@@ -36,6 +36,31 @@ best = load("best_release", "tools/best-release.py")
 queue = load("audit_queue", "tools/audit-queue.py")
 
 
+def test_the_tools_import_without_their_optional_dependencies():
+    """Reading a module must not end the process.
+
+    best-release.py exited on import when numpy was absent, so nothing could
+    import it — not a test, not a sibling tool, not anything wanting only the
+    file-list logic. CI has no numpy and found this immediately; every local
+    run had it and never would have.
+    """
+    import builtins
+    real = builtins.__import__
+
+    def without_numpy(name, *args, **kwargs):
+        if name == "numpy":
+            raise ImportError("pretending numpy is not installed")
+        return real(name, *args, **kwargs)
+
+    builtins.__import__ = without_numpy
+    try:
+        again = load("best_release_bare", "tools/best-release.py")
+    finally:
+        builtins.__import__ = real
+    # And the parts that never needed it still work.
+    assert again.classify(again.extensions(["a.flac"])) == "lossless"
+
+
 # ── the reaper ────────────────────────────────────────────────────────────
 
 class FakeQueue:
