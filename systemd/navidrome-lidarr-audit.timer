@@ -1,0 +1,20 @@
+[Unit]
+Description=Audition a lossy album every half hour
+Documentation=https://github.com/danielbanariba/navidrome-lidarr-bridge
+
+[Timer]
+# Half an hour is the point, not a compromise. Twenty auditions run back to
+# back tripped the indexers' rate limits and got two of them disabled, after
+# which every answer was "no better copy" about a search that never happened.
+# At this pace a library of ninety lossy albums is covered in under two days,
+# and afterwards it only has to keep up with what arrives.
+OnBootSec=15min
+OnUnitActiveSec=30min
+# Without this, a machine that was asleep runs every missed firing at once,
+# which is exactly the burst this pace exists to avoid.
+Persistent=false
+AccuracySec=1min
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
