@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The service itself has no dependencies — no requirements.txt and no pip
+      # install in the Dockerfile — and that is worth keeping true. pytest is
+      # the only thing installed here, and only to run the tests.
+      - run: pip install pytest
+      - run: python -m pytest tests/ -q
+
+      # Every tool is executable and every one of them is a syntax error away
+      # from failing at three in the morning inside a systemd timer, where
+      # nobody is watching.
+      - run: python -m compileall -q bridge.py tools/ deploy/
+
+      # The documented first step, run the way a user runs it. It also proves
+      # the example file is enough on its own.
+      - name: the documented setup validates
+        run: |
+          cp deploy/.env.example .env
+          MUSIC_DIR=/tmp DATA_DIR=/tmp \
+            docker compose -f deploy/docker-compose.yml config >/dev/null
+
+      # And a clone nobody has configured yet, which is what a stranger sees
+      # first. A missing .env used to be a parse error before they could read
+      # a single line of it.
+      - name: an unconfigured clone validates too
+        run: |
+          rm -f .env
+          MUSIC_DIR=/tmp DATA_DIR=/tmp \
+            docker compose -f deploy/docker-compose.yml config >/dev/null
+
+      - name: the image builds
+        run: docker build -q -t navidrome-lidarr-bridge:ci .

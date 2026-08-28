@@ -98,7 +98,12 @@ services:
     # Not a LinuxServer image, so PUID/PGID are ignored: set the uid directly to
     # keep the state volume owned by the host user rather than root.
     user: "${PUID:-1000}:${PGID:-1000}"
-    env_file: [../.env]
+    # Optional so a fresh clone can be inspected before it is configured.
+    # Missing credentials are not a parse error, they are a runtime one, and
+    # the bridge names the ones it is missing when it starts.
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       <<: *env
       NAVIDROME_URL: http://navidrome:4533
