@@ -1,0 +1,41 @@
+# Navidrome and the bridge on one origin.
+#
+# Two problems are solved by the same move. A page served over HTTPS cannot call
+# plain http://host:8687 — the browser blocks it as mixed content — and calling
+# it cross-origin needs CORS that nothing here should have to configure. Mount
+# both under one hostname and neither problem exists.
+#
+# The panel picks its own target: the bridge's port when the page is Navidrome's
+# own :4533, and this /ndlb prefix everywhere else. Nothing to configure in the
+# browser.
+#
+# Copy to /etc/caddy/Caddyfile on a host that already runs Caddy, or use the
+# `caddy` profile in docker-compose.yml, which mounts this file and reaches the
+# services by container name instead.
+#
+# Change the hostname to whatever you actually serve, and add it to the
+# userscript's @match list — the script does not fire on a host it has never
+# heard of.
+
+{$SITE_HOST:navidrome.localhost} {
+	# handle_path strips the prefix, so /ndlb/missing arrives at the bridge as
+	# /missing.
+	#
+	# That stripping is why PUBLIC_SCRIPT_URL exists and is not optional here.
+	# The bridge cannot see the prefix, so the @updateURL it derives for the
+	# userscript comes out missing it — and Tampermonkey follows that broken
+	# address without complaining, so updates simply stop, silently, for weeks.
+	handle_path /ndlb/* {
+		reverse_proxy {$BRIDGE_HOST:localhost}:8687
+	}
+
+	reverse_proxy {$NAVIDROME_HOST:localhost}:4533
+
+	# Caddy's own internal CA. A real certificate needs a real domain; this is
+	# enough for a machine on your own network, and it is what makes the page
+	# HTTPS — which is the whole reason the bridge has to share this origin.
+	tls internal
+}
+
+# Navidrome keeps serving its own port untouched, so the userscript still works
+# there without any of this. Nothing above replaces it; it sits alongside.

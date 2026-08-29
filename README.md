@@ -620,6 +620,24 @@ PUBLIC_SCRIPT_URL=https://navidrome.example/ndlb/userscript.js
 
 ## Behind a reverse proxy
 
+`deploy/Caddyfile` and `nginx/navidrome-panel.conf` are both in the repository
+and both validated on every push, because a proxy config is only ever read by
+the proxy — at three in the morning, when it refuses to start and takes the
+whole site with it.
+
+They do different jobs and can be run together. Caddy puts Navidrome and the
+bridge on one origin over HTTPS, which is what makes the panel work at all from
+a browser: a page served over HTTPS cannot call plain `http://host:8687`, the
+browser blocks it as mixed content. nginx injects the panel into the HTML, so
+nothing has to be installed in any browser.
+
+```
+docker compose -f deploy/docker-compose.yml --profile caddy up -d
+docker compose -f deploy/docker-compose.yml --profile panel up -d
+```
+
+
+
 Serving Navidrome under a hostname breaks two things at once: the userscript's
 `@match` no longer fires, and — once the proxy terminates TLS — the page can no
 longer call the bridge on plain `http://host:8687`, because a browser blocks
