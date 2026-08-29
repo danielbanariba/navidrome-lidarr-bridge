@@ -596,6 +596,26 @@ def is_studio(album: dict) -> bool:
                    for s in (album.get("secondaryTypes") or []))
 
 
+def enumerating_pressings(added: int, catalogue: int) -> bool:
+    """Whether a second catalogue is naming records or listing pressings.
+
+    Discogs earns its place by covering what MusicBrainz missed: for a band
+    nobody catalogued properly it found three records that were genuinely
+    absent, one of them already on the shelf.
+
+    For a band everybody catalogued it does something else entirely. It lists
+    every pressing, so AC/DC — whose seventeen albums MusicBrainz has in full —
+    came back with sixty-one more singles, promos and radio specials, burying
+    the thirteen records that could actually be requested.
+
+    Adding more than the catalogue holds is the signal. A source filling gaps
+    adds a few; one enumerating pressings adds more than exist. An empty
+    catalogue proves nothing either way and is left alone, because that is the
+    case where the second source is all there is.
+    """
+    return catalogue > 0 and added > catalogue
+
+
 def missing_albums(nd_artist_id: str) -> dict:
     """Albums Lidarr knows for this artist that Navidrome does not have.
 
@@ -713,6 +733,28 @@ def missing_albums(nd_artist_id: str) -> dict:
     except FETCH_ERRORS as exc:
         log.warning("discogs lookup failed for %r: %s", name, exc)
         extra = []
+    # Discogs is here to cover what MusicBrainz missed, and for a band nobody
+    # catalogued properly that is exactly what it does: seven albums against
+    # ten, including the 2017 record already on the shelf.
+    #
+    # For a band everybody catalogued it does something else. Discogs lists
+    # every pressing, so AC/DC — whose seventeen albums MusicBrainz has in full
+    # — came back with sixty-one more: singles, promos, radio specials, box
+    # sets. Thirteen records that could actually be requested were buried under
+    # sixty-one that never could be.
+    #
+    # Adding more than the catalogue holds is the signal. A source filling gaps
+    # adds a few; one enumerating pressings adds more than exist.
+    unseen = [a for a in extra
+              if not is_owned(a["title"]) and norm_title(a["title"]) not in missing]
+    pressings = 0
+    if enumerating_pressings(len(unseen), len(entries)):
+        pressings = len(unseen)
+        log.info("discogs added %d entries to a catalogue of %d for %r: "
+                 "pressings rather than records, dropped",
+                 len(unseen), len(entries), name)
+        extra = [a for a in extra if norm_title(a["title"]) in missing]
+
     for album in extra:
         key = norm_title(album["title"])
         if is_owned(album["title"]):
@@ -730,6 +772,10 @@ def missing_albums(nd_artist_id: str) -> dict:
     missing = sorted(missing.values(), key=lambda a: a["year"] or "9999")
     return {"artist": name, "monitored": True, "owned": len(owned),
             "artistMbid": mbid, "lidarrArtistId": match["id"],
+            # Named rather than silently dropped: a caller that hides something
+            # should be able to say how much, and a count nobody can see is
+            # indistinguishable from a bug.
+            "discogsPressingsHidden": pressings,
             "missing": missing, "held": held}
 
 

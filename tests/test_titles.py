@@ -16,7 +16,8 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bridge import is_studio, norm_title, owned_match, owns_title, split_parts  # noqa: E402
+from bridge import (enumerating_pressings, is_studio, norm_title,  # noqa: E402
+                    owned_match, owns_title, split_parts)
 
 
 def owns(have: str, catalogue: str) -> bool:
@@ -132,3 +133,24 @@ def test_what_counts_as_a_gap(album, expected):
     # album counts as missing — listing singles as gaps buried the four records
     # that really were absent under forty that never had been.
     assert is_studio(album) is expected
+
+
+PRESSINGS = [
+    # AC/DC: seventeen albums catalogued, sixty-one more from Discogs. Singles,
+    # promos and radio specials burying thirteen records that could be asked for.
+    (61, 17, True),
+    # Delirium: seven catalogued, two added — the records MusicBrainz missed,
+    # which is the whole reason the second source is consulted.
+    (2, 7, False),
+    (7, 7, False),
+    (8, 7, True),
+    # An artist nothing has catalogued. The second source is all there is, so
+    # whatever it says stands.
+    (40, 0, False),
+    (0, 0, False),
+]
+
+
+@pytest.mark.parametrize("added,catalogue,expected", PRESSINGS)
+def test_naming_records_against_listing_pressings(added, catalogue, expected):
+    assert enumerating_pressings(added, catalogue) is expected
