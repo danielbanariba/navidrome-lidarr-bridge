@@ -222,3 +222,41 @@ def test_not_having_asked_is_never_recorded_as_a_verdict():
     output = ("NOTHING WAS SEARCHED: every indexer is disabled by Prowlarr.\n"
               "  no lossless copy found in 0 release(s)\n")
     assert queue.read_verdict(output)[0] == "unanswered"
+
+
+# ── when an album comes back around ───────────────────────────────────────
+
+def album(ident):
+    return {"albumId": ident, "artist": "A", "album": "B", "bitrate": 128}
+
+
+def test_never_asked_comes_first():
+    assert queue.due([album(1), album(2)], {})["albumId"] == 1
+
+
+def test_a_verdict_keeps_for_a_month():
+    fresh = {"1": {"at": time.time() - 3600, "verdict": "no-lossless"}}
+    assert queue.due([album(1)], fresh) is None
+
+
+def test_not_having_asked_keeps_for_hours():
+    # Thirty-four albums were filed unanswered while every indexer was
+    # disabled. Treating that like a verdict leaves them unasked for a month
+    # over an outage that lasted an afternoon.
+    recent = {"1": {"at": time.time() - 3600, "verdict": "unanswered"}}
+    assert queue.due([album(1)], recent) is None
+    old = {"1": {"at": time.time() - 8 * 3600, "verdict": "unanswered"}}
+    assert queue.due([album(1)], old)["albumId"] == 1
+
+
+def test_a_stale_verdict_comes_back():
+    ancient = {"1": {"at": time.time() - 40 * 86400, "verdict": "no-lossless"}}
+    assert queue.due([album(1)], ancient)["albumId"] == 1
+
+
+def test_the_longest_unasked_goes_first():
+    ledger = {
+        "1": {"at": time.time() - 50 * 86400, "verdict": "no-lossless"},
+        "2": {"at": time.time() - 90 * 86400, "verdict": "no-lossless"},
+    }
+    assert queue.due([album(1), album(2)], ledger)["albumId"] == 2

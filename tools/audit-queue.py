@@ -53,6 +53,10 @@ STATE_DIR = os.environ.get("STATE_DIR", os.path.join(ROOT, "state"))
 LEDGER = os.path.join(STATE_DIR, "audited.json")
 PYTHON = os.environ.get("AUDIT_PYTHON", os.path.join(ROOT, ".venv/bin/python"))
 RETRY_DAYS = float(os.environ.get("AUDIT_RETRY_DAYS", "30"))
+# A verdict keeps for a month. "Could not ask" keeps for hours, because it is
+# not a verdict at all — it is a note that the question failed, and an outage
+# that lasted an afternoon should not silence an album until September.
+UNANSWERED_HOURS = float(os.environ.get("AUDIT_UNANSWERED_HOURS", "6"))
 # Long enough for a slow swarm, short enough that a timer firing every half
 # hour never overlaps with itself.
 TIMEOUT = int(os.environ.get("AUDIT_TIMEOUT", "1500"))
@@ -171,8 +175,21 @@ def due(albums: list[dict], ledger: dict) -> dict | None:
     fresh = [a for a in albums if str(a["albumId"]) not in ledger]
     if fresh:
         return fresh[0]
-    cutoff = time.time() - RETRY_DAYS * 86400
-    stale = [a for a in albums if ledger.get(str(a["albumId"]), {}).get("at", 0) < cutoff]
+
+    now = time.time()
+
+    def expired(album: dict) -> bool:
+        entry = ledger.get(str(album["albumId"]), {})
+        age = now - entry.get("at", 0)
+        if entry.get("verdict") == "unanswered":
+            return age > UNANSWERED_HOURS * 3600
+        return age > RETRY_DAYS * 86400
+
+    # Thirty-four albums here were filed unanswered while every indexer was
+    # disabled. Treating that like a verdict would have left them unasked for a
+    # month over an outage that lasted an afternoon — which is the whole reason
+    # not having asked is recorded separately from having no answer.
+    stale = [a for a in albums if expired(a)]
     if not stale:
         return None
     return min(stale, key=lambda a: ledger.get(str(a["albumId"]), {}).get("at", 0))
