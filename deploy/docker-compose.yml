@@ -132,6 +132,34 @@ services:
       - "${PANEL_PORT:-4534}:4534"
     depends_on: [navidrome, bridge]
 
+  # One origin for Navidrome and the bridge, over HTTPS. A page served over
+  # HTTPS cannot call plain http://host:8687 at all — the browser blocks it as
+  # mixed content — so sharing an origin is not a preference, it is what makes
+  # the panel work behind a proxy.
+  #
+  # `docker compose --profile caddy up -d`. The nginx `panel` profile does a
+  # different job: it injects the panel into the HTML so nothing has to be
+  # installed in the browser. Run either, or both.
+  caddy:
+    <<: *common
+    image: caddy:alpine
+    container_name: navidrome-caddy
+    profiles: [caddy]
+    environment:
+      <<: *env
+      SITE_HOST: ${SITE_HOST:-navidrome.localhost}
+      # By container name: inside this network there is no localhost to reach.
+      NAVIDROME_HOST: navidrome
+      BRIDGE_HOST: bridge
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config/caddy/data:/data
+      - ./config/caddy/config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on: [navidrome, bridge]
+
 networks:
   music:
     name: music
