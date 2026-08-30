@@ -202,6 +202,12 @@ def test_the_id_is_read_out_of_the_magnet(url, expected):
 # ── what an audition concluded ────────────────────────────────────────────
 
 VERDICTS = [
+    # Taken verbatim from what the audition prints. Written from memory instead,
+    # these matched nothing and four successful upgrades were filed as failures.
+    ("  handed to Lidarr (category lidarr)", "replaced"),
+    ("\n  the best on offer is itself a transcode — taking it because it "
+     "beats what is held", "replaced-with-a-transcode"),
+    ("\n  nothing on offer beats what the library already has", "kept"),
     ("NOTHING WAS SEARCHED: every indexer is disabled", "unanswered"),
     ("  1 proven lossless, wanted 4", "found-not-taken"),
     ("  no lossless copy found in 5 release(s)", "no-lossless"),

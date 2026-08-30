@@ -207,9 +207,16 @@ def read_verdict(output: str) -> tuple[str, str]:
         return "unanswered", "indexers were disabled; nothing was asked"
     for line in output.splitlines():
         stripped = line.strip()
-        if stripped.startswith("replaced ") or " -> handed to Lidarr" in stripped:
+        # Matched against what the audition actually prints. These were written
+        # against an imagined output — "-> handed to Lidarr", with an arrow that
+        # appears nowhere — so four successful upgrades were filed as failures,
+        # one of them an album that is FLAC on disk today because of the very
+        # run recorded as not having taken it.
+        if stripped.startswith("handed to Lidarr"):
             return "replaced", stripped
-        if "keeping what you have" in stripped or "nothing better" in stripped:
+        if "the best on offer is itself a transcode" in stripped:
+            return "replaced-with-a-transcode", stripped
+        if "nothing on offer beats what the library already has" in stripped:
             return "kept", stripped
     if re.search(r"\d+ proven lossless", output):
         return "found-not-taken", "a lossless copy was proven but not imported"
