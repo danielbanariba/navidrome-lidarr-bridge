@@ -49,9 +49,15 @@ jobs:
           docker run --rm -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:alpine caddy validate --config /etc/caddy/Caddyfile
 
+      # nginx resolves its upstreams while testing the config, and neither
+      # container exists here. Pointing both names at nothing lets it check the
+      # syntax, which is the part that can be wrong in a file.
       - name: the nginx config is valid
         run: |
-          docker run --rm -v "$PWD/nginx/navidrome-panel.conf:/etc/nginx/conf.d/default.conf:ro" \
+          docker run --rm \
+            --add-host navidrome-lidarr-bridge:127.0.0.1 \
+            --add-host host.docker.internal:127.0.0.1 \
+            -v "$PWD/nginx/navidrome-panel.conf:/etc/nginx/conf.d/default.conf:ro" \
             nginx:alpine nginx -t
 
       - name: the image builds
