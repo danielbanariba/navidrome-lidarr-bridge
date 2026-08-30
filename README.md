@@ -590,6 +590,33 @@ to override the `.env`: `EnvironmentFile` is read immediately before the process
 starts and wins over `Environment=` whatever order they appear in, and that file
 names Docker's own hostnames, which do not resolve from the host.
 
+## The backlog nobody searches: `tools/search-backlog.py`
+
+Lidarr never searches its own catalogue. The RSS sync sees only what an indexer
+has just published, so a record from 2016 sits wanted forever while nothing
+looks for it. Sixty-seven wanted here and three downloads running.
+
+Its own "Search for Missing" asks for all of them at once, which is how this
+machine lost every one of its indexers for a day.
+
+```
+tools/search-backlog.py --target 15                   # keep fifteen going
+tools/search-backlog.py --service radarr --target 10  # films, same pacing
+tools/search-backlog.py --dry-run                     # name what it would ask
+```
+
+Radarr and Sonarr have the same problem for the same reason, and Prowlarr feeds
+all three — so a burst from any of them takes the indexers down for all of them.
+One implementation means the guards cannot drift apart, and they were expensive
+to learn.
+
+It stops the moment an indexer falls over, refuses to start when they are all
+out, and keeps a ledger per service so a film asked about last week is not asked
+about again this week.
+
+**Check which indexers are actually up before reading anything into an empty
+result.** A search nobody could make is not an answer about what exists.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in the Navidrome credentials and the

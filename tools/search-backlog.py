@@ -27,6 +27,7 @@ import argparse
 import functools
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -38,6 +39,20 @@ import urllib.request
 print = functools.partial(print, flush=True)  # noqa: A001 - deliberate shadow
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The same pacing serves Radarr and Sonarr, which have the same problem for the
+# same reason: Prowlarr feeds all three, so a burst from any of them takes the
+# indexers down for all of them. One place for the guards means they cannot
+# drift apart, and these guards were expensive to learn.
+SERVICES = {
+    "lidarr": {"port": 8686, "api": "v1", "wanted": "wanted/missing",
+               "command": "AlbumSearch", "ids": "albumIds", "what": "album"},
+    "radarr": {"port": 7878, "api": "v3", "wanted": "wanted/missing",
+               "command": "MoviesSearch", "ids": "movieIds", "what": "movie"},
+    "sonarr": {"port": 8989, "api": "v3", "wanted": "wanted/missing",
+               "command": "EpisodeSearch", "ids": "episodeIds", "what": "episode"},
+}
+SERVICE = os.environ.get("SEARCH_SERVICE", "lidarr")
+
 LIDARR = os.environ.get("LIDARR_URL", "http://localhost:8686").rstrip("/")
 LIDARR_KEY = os.environ.get("LIDARR_API_KEY", "")
 PROWLARR = os.environ.get("PROWLARR_URL", "http://localhost:9696").rstrip("/")
@@ -54,13 +69,35 @@ PAUSE = int(os.environ.get("SEARCH_PAUSE", "300"))
 RETRY_DAYS = float(os.environ.get("SEARCH_RETRY_DAYS", "7"))
 
 
+def service() -> dict:
+    if SERVICE not in SERVICES:
+        sys.exit(f"unknown service {SERVICE!r}; one of {', '.join(SERVICES)}")
+    return SERVICES[SERVICE]
+
+
+def service_key() -> str:
+    """The API key, from the environment or from the config the service wrote."""
+    env = os.environ.get(f"{SERVICE.upper()}_API_KEY", "").strip()
+    if env:
+        return env
+    for path in (os.path.join(os.path.dirname(ROOT), SERVICE, "config.xml"),
+                 os.path.join(ROOT, "config", SERVICE, "config.xml")):
+        try:
+            found = re.search(r"<ApiKey>([^<]+)</ApiKey>", open(path).read())
+        except OSError:
+            continue
+        if found:
+            return found.group(1)
+    sys.exit(f"no {SERVICE} API key: set {SERVICE.upper()}_API_KEY")
+
+
 def lidarr(path: str, method: str = "GET", body=None):
-    if not LIDARR_KEY:
-        sys.exit("set LIDARR_API_KEY")
+    svc = service()
+    base = os.environ.get(f"{SERVICE.upper()}_URL", f"http://localhost:{svc['port']}").rstrip("/")
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
-        f"{LIDARR}/api/v1/{path}", data=data, method=method,
-        headers={"X-Api-Key": LIDARR_KEY, "Content-Type": "application/json"})
+        f"{base}/api/{svc['api']}/{path}", data=data, method=method,
+        headers={"X-Api-Key": service_key(), "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as resp:
         raw = resp.read()
     return json.loads(raw) if raw else None
@@ -130,7 +167,14 @@ def main() -> None:
                          "indexer on this machine for a day.")
     ap.add_argument("--dry-run", action="store_true",
                     help="name what it would ask for and stop")
+    ap.add_argument("--service", choices=sorted(SERVICES),
+                    help="which of the three to work through (default lidarr)")
     args = ap.parse_args()
+    if args.service:
+        global SERVICE, LEDGER
+        SERVICE = args.service
+        # A ledger each: asking about a film says nothing about an album.
+        LEDGER = os.path.join(STATE_DIR, f"searched-{SERVICE}.json")
 
     # Ignoring the ones already known to be out: 1337x is Cloudflare-banned for
     # this address and waiting for it would mean never starting.
@@ -157,7 +201,8 @@ def main() -> None:
 
     wanted = lidarr("wanted/missing?pageSize=500&includeArtist=true")["records"]
     due = [a for a in wanted if ledger.get(str(a["id"]), 0) < cutoff]
-    print(f"\n  {len(wanted)} album(s) wanted, {len(due)} not asked about in "
+    what = service()["what"]
+    print(f"\n  {len(wanted)} {what}(s) wanted, {len(due)} not asked about in "
           f"the last {RETRY_DAYS:g} days")
     if before:
         print(f"  already out of service, and not waited for: {', '.join(sorted(before))}")
@@ -192,13 +237,19 @@ def main() -> None:
 
         batch = due[start:start + args.batch]
         for album in batch:
-            artist = (album.get("artist") or {}).get("artistName", "?")
-            print(f"    asking for {artist[:24]} — {album.get('title', '?')[:34]}")
+            # Each service names the parent differently, and none of them is
+            # always there — a wanted episode carries a series, a film carries
+            # nothing above it.
+            parent = ((album.get("artist") or album.get("series") or {})
+                      .get("artistName") or (album.get("series") or {}).get("title") or "")
+            label = f"{parent[:22]} — " if parent else ""
+            print(f"    asking for {label}{album.get('title', '?')[:40]}")
             if args.dry_run:
                 continue
             try:
+                svc = service()
                 lidarr("command", "POST",
-                       {"name": "AlbumSearch", "albumIds": [album["id"]]})
+                       {"name": svc["command"], svc["ids"]: [album["id"]]})
                 ledger[str(album["id"])] = int(time.time())
                 asked += 1
             except urllib.error.HTTPError as exc:
@@ -212,7 +263,8 @@ def main() -> None:
     if args.dry_run:
         print(f"\n  --dry-run: nothing was asked for")
         return
-    print(f"\n  asked about {asked} album(s); {queued()} download(s) running")
+    print(f"\n  asked about {asked} {service()['what']}(s); "
+          f"{queued()} download(s) running")
 
 
 if __name__ == "__main__":
