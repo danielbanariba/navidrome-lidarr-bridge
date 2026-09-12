@@ -1,0 +1,18 @@
+[Unit]
+Description=Report Lidarr downloads stuck at importFailed every half hour
+Documentation=https://github.com/danielbanariba/navidrome-lidarr-bridge
+
+[Timer]
+# The same cadence as the audit timer, and for a related reason: this only
+# ever notifies once per download id, so running it often costs nothing but
+# a shorter detection delay — the ledger is what keeps a human from being
+# nagged, not the timer's pace.
+OnBootSec=10min
+OnUnitActiveSec=30min
+# Without this, a machine that was asleep runs every missed firing at once.
+Persistent=false
+AccuracySec=1min
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
