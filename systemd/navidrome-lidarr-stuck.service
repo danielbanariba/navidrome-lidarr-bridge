@@ -1,0 +1,22 @@
+[Unit]
+Description=Report Lidarr downloads stuck at importFailed
+Documentation=https://github.com/danielbanariba/navidrome-lidarr-bridge
+# Only reads Lidarr's own queue endpoint, but it still needs the network
+# stack up before that can answer.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/servarr/navidrome-lidarr-bridge
+# The .env is sourced by the wrapper rather than by systemd, for the same
+# reason as the audit unit: EnvironmentFile is read immediately before the
+# process starts and so overrides Environment= regardless of ordering here,
+# and that file is written for the bridge, which reaches Lidarr by container
+# name — a name the host cannot resolve.
+ExecStart=%h/servarr/navidrome-lidarr-bridge/tools/stuck-imports.sh --notify
+# One queue read and a little local JSON — nothing here waits on a download
+# or a search, so it never needs the audit unit's long allowance.
+TimeoutStartSec=120
+Nice=10
+IOSchedulingClass=idle

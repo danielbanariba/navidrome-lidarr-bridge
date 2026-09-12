@@ -33,6 +33,13 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# indexers_down() now also backs stuck-imports.py's own indexer-health poll.
+# One copy means the None-vs-[] distinction below — the one that stopped
+# sixty-seven searches from disabling every indexer here — cannot quietly
+# drift apart between the two tools that both depend on getting it right.
+import indexers  # noqa: E402
+
 # This runs for minutes and prints as it goes. Redirected to a file, the default
 # buffering held every line until it ended, so a run that was working looked
 # exactly like one that had hung.
@@ -103,37 +110,6 @@ def lidarr(path: str, method: str = "GET", body=None):
     return json.loads(raw) if raw else None
 
 
-def indexers_down() -> list[str] | None:
-    """Indexers Prowlarr has taken out of service, by name, or None.
-
-    None means the question could not be asked, and it is not the same as an
-    empty list. Swallowing the failure and returning [] said "nothing is down"
-    whenever Prowlarr was slow — so the guard that exists to stop this tool the
-    moment an indexer falls over could be silenced by the very load that was
-    knocking them over. Sixty-seven searches went out and every indexer here
-    ended up disabled.
-
-    Checked before every batch rather than once at the start. The point of
-    pausing is to notice when the pause was not enough.
-    """
-    if not PROWLARR_KEY:
-        return []
-    try:
-        head = {"X-Api-Key": PROWLARR_KEY}
-
-        def get(path):
-            req = urllib.request.Request(f"{PROWLARR}/api/v1/{path}", headers=head)
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return json.load(resp)
-
-        names = {i["id"]: i.get("name", str(i["id"])) for i in get("indexer")}
-        return [names.get(s.get("indexerId"), "?") for s in get("indexerstatus")]
-    except Exception as exc:
-        print(f"    could not ask Prowlarr which indexers are up: "
-              f"{type(exc).__name__}")
-        return None
-
-
 def load() -> dict:
     try:
         with open(LEDGER) as fh:
@@ -178,7 +154,7 @@ def main() -> None:
 
     # Ignoring the ones already known to be out: 1337x is Cloudflare-banned for
     # this address and waiting for it would mean never starting.
-    first = indexers_down()
+    first = indexers.indexers_down()
     if first is None:
         sys.exit("  Prowlarr could not be reached. Not searching blind — that is "
                  "how every indexer here ended up disabled.")
@@ -224,7 +200,7 @@ def main() -> None:
             break
         # An indexer that went down since the last batch is the signal to stop.
         # Searching past it produces empty answers that look like real ones.
-        current = indexers_down()
+        current = indexers.indexers_down()
         if current is None:
             print("\n  stopping: Prowlarr stopped answering, so there is no way "
                   "to tell whether the indexers are still up.")

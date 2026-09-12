@@ -42,6 +42,38 @@ def read_cue(path: str) -> str:
     return raw.decode("latin-1", "replace")
 
 
+def clean_title(title: str, number: int) -> str:
+    """The track's name, with the tracklist line it was pasted from removed.
+
+    A cue sheet is whatever the ripper typed. One here held the whole printed
+    line in every per-track TITLE — "1. Kong @ the Gates 1:24" — and splitting
+    it wrote that string into eighteen title tags, which is what a listener
+    then saw. The file names were right; they come from MusicBrainz. Only the
+    tags were wrong.
+
+    Timid on purpose, because the alternative is renaming records that were
+    never broken:
+
+      * A leading number goes only when it is this track's own. On track three
+        a title opening "7." is the record's name, not a stray index.
+      * A trailing time goes only from the end, so "9:12 in the Morning" keeps
+        its own.
+      * Whatever survives must still contain a letter. "1. 2:34" is a number
+        and a duration with no name between them, and no amount of stripping
+        produces one — better to leave it visibly wrong than to file the album
+        under a running time.
+    """
+    cleaned = title.strip()
+    ours = re.match(r"^0*(\d+)\s*[.\-)]\s*(.+)$", cleaned)
+    if ours and int(ours.group(1)) == number:
+        cleaned = ours.group(2).strip()
+    trailing = re.match(r"^(.*\S)\s+\d{1,2}:\d{2}$", cleaned)
+    if trailing:
+        cleaned = trailing.group(1).strip()
+    # \w minus digits and underscore: a letter, in any alphabet the library has.
+    return cleaned if re.search(r"[^\W\d_]", cleaned) else title
+
+
 def parse(text: str) -> tuple[str, str, list[dict]]:
     album = (re.search(r'^TITLE\s+"(.*)"', text, re.M) or [None, ""])[1]
     artist = (re.search(r'^PERFORMER\s+"(.*)"', text, re.M) or [None, ""])[1]
@@ -52,9 +84,11 @@ def parse(text: str) -> tuple[str, str, list[dict]]:
         if not (found and index):
             continue
         minutes, seconds, frames = (int(x) for x in index.groups())
+        number = int(found.group(1))
         tracks.append({
-            "n": int(found.group(1)),
-            "title": (re.search(r'TITLE\s+"(.*)"', block) or [None, ""])[1],
+            "n": number,
+            "title": clean_title(
+                (re.search(r'TITLE\s+"(.*)"', block) or [None, ""])[1], number),
             # Cue sheets count in frames, and there are 75 of them to a second.
             "start": minutes * 60 + seconds + frames / 75.0,
         })
