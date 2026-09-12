@@ -1,0 +1,25 @@
+[Unit]
+Description=Ask the indexers about a few of the albums Lidarr still wants
+Documentation=https://github.com/danielbanariba/navidrome-lidarr-bridge
+# Every question goes to Prowlarr and from there to the indexers, and the run
+# checks which of them are up before each round. Starting before the network
+# answers means the first check fails and the run stops having asked nothing.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/servarr/navidrome-lidarr-bridge
+# The .env is sourced by the wrapper rather than by systemd, for the same
+# reason as the audit unit: EnvironmentFile is read immediately before the
+# process starts and so overrides Environment= regardless of ordering here,
+# and that file is written for the bridge, which reaches its neighbours by
+# container name — names the host cannot resolve.
+ExecStart=%h/servarr/navidrome-lidarr-bridge/tools/search-backlog.sh
+# A full run is twelve albums in rounds of two, five minutes apart, so half an
+# hour is the normal case. This has to outlast that without ever killing a run
+# mid-round, which would leave the ledger saying an album was asked about when
+# the question never went out.
+TimeoutStartSec=2700
+Nice=10
+IOSchedulingClass=idle

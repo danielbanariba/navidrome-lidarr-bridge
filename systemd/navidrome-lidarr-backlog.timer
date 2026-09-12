@@ -1,0 +1,28 @@
+[Unit]
+Description=Work through Lidarr's backlog a few albums at a time
+Documentation=https://github.com/danielbanariba/navidrome-lidarr-bridge
+
+[Timer]
+# Lidarr never searches its own backlog, and nothing here was scheduled to do
+# it for it: of a hundred and twenty-four wanted albums, fifty-seven had never
+# been asked about even once, and the rest not for a fortnight. "Not found"
+# and "never looked" are indistinguishable from the outside, and this is the
+# unit that tells them apart.
+#
+# Two hours, because the run is already paced internally — twelve albums, two
+# at a time, five minutes apart — and the pace that matters is the one across
+# runs. Sixty-seven questions inside half an hour disabled every indexer on
+# this machine for a day; the tool now refuses to repeat that, and this timer
+# must not hand it the chance. At this rate the whole backlog is covered in a
+# day, after which the seven-day ledger keeps it quiet until there is
+# something new to ask about.
+OnBootSec=45min
+OnUnitActiveSec=2h
+# Without this, a machine that was asleep runs every missed firing at once,
+# which is exactly the burst this pace exists to avoid.
+Persistent=false
+AccuracySec=1min
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
