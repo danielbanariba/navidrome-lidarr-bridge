@@ -1,0 +1,24 @@
+[Unit]
+Description=Reconcile Lidarr against Navidrome once a day
+Documentation=https://github.com/danielbanariba/navidrome-lidarr-bridge
+
+[Timer]
+# Daily, not hourly. Lidarr only holds a fraction of what is on disk here —
+# ninety-one artists against the six hundred Navidrome can see — because the
+# rest of the library is organised by format and genre rather than by artist,
+# which is a shape Lidarr cannot own. That gap is not a fault to be closed; it
+# is simply where the music lives. What matters is that Lidarr stops asking for
+# records that are already downstairs, and library drift is slow: albums arrive
+# by the handful, not by the hour. The other units here fire every half hour or
+# two because they chase things that move; this one does not.
+OnCalendar=daily
+# The others deliberately skip missed firings, since a burst of searches is
+# exactly what they exist to avoid. This one asks Lidarr and Navidrome about
+# their own contents and grabs nothing, so a machine that was off overnight
+# should still get its reconciliation rather than wait another day.
+Persistent=true
+AccuracySec=5min
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

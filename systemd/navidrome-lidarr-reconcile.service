@@ -1,0 +1,26 @@
+[Unit]
+Description=Stop Lidarr hunting for records Navidrome can already see
+Documentation=https://github.com/danielbanariba/navidrome-lidarr-bridge
+# Asks Navidrome about every artist Lidarr knows, so both have to be answering.
+# Navidrome runs natively on the host; Lidarr is a container. Starting before
+# the network is up means every artist lookup fails, and a failed lookup is
+# correctly read as "unknown" rather than "owns nothing" — so the run would do
+# no harm, but it would also do nothing.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/servarr/navidrome-lidarr-bridge
+# The .env is sourced by the wrapper rather than by systemd, for the same
+# reason as the audit unit: EnvironmentFile is read immediately before the
+# process starts and so overrides Environment= regardless of ordering here,
+# and that file is written for the bridge, which reaches its neighbours by
+# container name — names the host cannot resolve.
+ExecStart=%h/servarr/navidrome-lidarr-bridge/tools/reconcile-once.sh
+# Two Navidrome lookups per artist over the network, and the library this runs
+# against holds six hundred of them. Generous, because being killed halfway
+# leaves Lidarr half-reconciled with no record of where it stopped.
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle
