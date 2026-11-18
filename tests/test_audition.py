@@ -295,3 +295,54 @@ def test_cleanup_never_deletes_a_torrent_already_handed_to_lidarr(monkeypatch):
     monkeypatch.setattr(best, "qbt", client)
     best.cleanup(["b" * 40, "c" * 40], None)
     assert client.deleted == ["b" * 40]
+
+
+def test_a_live_album_whose_folder_says_live_still_pairs_its_tracks():
+    paths = ["/x/1994 - MTV Unplugged in New York/01 About a Girl.flac",
+             "/x/1994 - MTV Unplugged in New York/02 Come as You Are.flac"]
+    tracks = [{"id": 1, "title": "About a Girl"}, {"id": 2, "title": "Come as You Are"}]
+    assert best.match_tracks(paths, tracks) == {1: paths[0], 2: paths[1]}
+
+
+def test_a_file_that_says_live_never_pairs_with_the_studio_track():
+    assert best.match_tracks(["/x/Singles/16-Raza Odiada (live).mp3"],
+                             [{"id": 1, "title": "Raza odiada"}]) is None
+
+
+def test_a_lidarr_error_after_the_handover_says_so_instead_of_crashing(monkeypatch, tmp_path, capsys):
+    fake = FakeLidarr()
+    real_get = fake.get
+
+    def failing(path):
+        if path == "/album/970":
+            raise best.urllib.error.URLError("connection refused")
+        return real_get(path)
+    monkeypatch.setattr(fake, "get", failing)
+    hand_over_singles(monkeypatch, tmp_path, fake)
+    assert "import it by hand" in capsys.readouterr().out
+
+
+def test_a_stop_during_the_import_says_it_needs_importing_by_hand(monkeypatch, tmp_path, capsys):
+    fake = FakeLidarr()
+    real_get = fake.get
+
+    def stopped(path):
+        if path.startswith("/command/"):
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real_get(path)
+    monkeypatch.setattr(fake, "get", stopped)
+    with pytest.raises(SystemExit):
+        hand_over_singles(monkeypatch, tmp_path, fake)
+    assert "import it by hand" in capsys.readouterr().out
+
+
+def test_a_grandchild_holding_the_pipes_does_not_hold_the_queue(tmp_path):
+    import time
+    child = ("import signal, subprocess, sys, time\n"
+             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+             "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])\n"
+             "time.sleep(60)\n")
+    started = time.time()
+    output = queue.run_audition([sys.executable, "-c", child], timeout=1, grace=1, drain=2)
+    assert time.time() - started < 15
+    assert output.endswith("the audition ran past its timeout and was stopped")

@@ -233,11 +233,13 @@ def read_verdict(output: str) -> tuple[str, str]:
 
 
 def run_audition(cmd: list[str], timeout: float = TIMEOUT,
-                 grace: float = GRACE) -> str:
+                 grace: float = GRACE, drain: float = 30) -> str:
     """Run one audition and return everything it printed.
 
     Past the timeout it is asked to stop (SIGTERM) and given the grace period
-    to clean up after itself; only a run that ignores that is killed.
+    to clean up after itself; only a run that ignores that is killed. Reading
+    what is left is bounded too: a process the audition started can hold the
+    pipes open after the audition itself is gone.
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, cwd=ROOT)
@@ -250,7 +252,12 @@ def run_audition(cmd: list[str], timeout: float = TIMEOUT,
             out, err = proc.communicate(timeout=grace)
         except subprocess.TimeoutExpired:
             proc.kill()
-            out, err = proc.communicate()
+            try:
+                out, err = proc.communicate(timeout=drain)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
+                for pipe in (proc.stdout, proc.stderr):
+                    pipe.close()
         return (out or "") + (err or "") + "\n  the audition ran past its timeout and was stopped"
 
 

@@ -1430,6 +1430,22 @@ def hand_over(album: dict, torrent: dict, picked: list[str] | None) -> None:
 def import_into(album: dict, download_id: str, picked: list[str]) -> bool:
     """Import the files picked out of a larger torrent into this album.
 
+    By now the winner is Lidarr's, so nothing here may end the run with a
+    traceback: whatever goes wrong is said, along with what is left to do.
+    """
+    try:
+        return _import_into(album, download_id, picked)
+    except SystemExit:
+        print("  stopped before Lidarr finished importing it; import it by hand")
+        raise
+    except Exception as exc:
+        print(f"  Lidarr failed during the import ({type(exc).__name__}); import it by hand")
+        return False
+
+
+def _import_into(album: dict, download_id: str, picked: list[str]) -> bool:
+    """The import itself.
+
     Left to itself, Lidarr reads the torrent's own title. "Brujeria -
     Discography (1990-2008)" was filed under three other albums, a singles
     compilation picked out of it for the Machetazos EP found none of them
@@ -1442,7 +1458,10 @@ def import_into(album: dict, download_id: str, picked: list[str]) -> bool:
     for _ in range(18):
         # A download Lidarr cannot tie to an artist (an "Unable to parse"
         # discography) is left out of the queue unless asked for.
-        records = lidarr("/queue?pageSize=1000&includeUnknownArtistItems=true").get("records", [])
+        try:
+            records = lidarr("/queue?pageSize=1000&includeUnknownArtistItems=true").get("records", [])
+        except Exception:
+            records = []  # a slow or restarting Lidarr; ask again
         if any((r.get("downloadId") or "").upper() == download_id for r in records):
             break
         time.sleep(10)
@@ -1470,7 +1489,10 @@ def import_into(album: dict, download_id: str, picked: list[str]) -> bool:
     started = command(name="ManualImport", files=files, importMode="auto",
                       replaceExistingFiles=False)
     for _ in range(12):
-        status = lidarr(f"/command/{started['id']}")
+        try:
+            status = lidarr(f"/command/{started['id']}")
+        except Exception:
+            status = {}
         if status.get("status") in ("completed", "failed"):
             break
         time.sleep(10)
@@ -1488,13 +1510,18 @@ def match_tracks(paths: list[str], tracks: list[dict]) -> dict[int, str] | None:
     def name(path: str) -> str:
         stem = os.path.splitext(os.path.basename(path))[0]
         return norm(re.sub(r"^\d{1,3}(?!\d)[-._)\s]+", "", stem))
-    def versions(path: str) -> set[str]:
-        return version_words(os.path.basename(os.path.dirname(path)) + " " + os.path.basename(path))
-    # norm() drops brackets, so "Song" and "Song (Demo)" read the same; a file
-    # and a track only pair when they name the same version.
+    def fits(path: str, title: str) -> bool:
+        # norm() drops brackets, so "Song" and "Song (Demo)" read the same. The
+        # track's version has to show somewhere in the file's path, and the
+        # file's own name must not claim one the track does not have. A folder
+        # saying "MTV Unplugged" is enough for tracks that do not repeat it.
+        own = version_words(os.path.basename(path))
+        around = own | version_words(os.path.basename(os.path.dirname(path)))
+        wanted = version_words(title)
+        return wanted <= around and own <= wanted
     pairs = sorted(((difflib.SequenceMatcher(None, name(p), norm(t["title"])).ratio(),
                      p, t["id"]) for p in paths for t in tracks
-                    if versions(p) == version_words(t["title"])), reverse=True)
+                    if fits(p, t["title"])), reverse=True)
     chosen: dict[int, str] = {}
     used: set[str] = set()
     for ratio, path, track_id in pairs:
