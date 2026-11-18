@@ -1509,7 +1509,10 @@ def match_tracks(paths: list[str], tracks: list[dict]) -> dict[int, str] | None:
     """
     def name(path: str) -> str:
         stem = os.path.splitext(os.path.basename(path))[0]
-        return norm(re.sub(r"^\d{1,3}(?!\d)[-._)\s]+", "", stem))
+        # Up to and including the track number: "04-Padre Nuerstro" and also
+        # "Alestorm - No Grave But The Sea - 01 Mexico", which compared whole
+        # against "Mexico" never matched. Never past a leading number: "3 AM".
+        return norm(re.sub(r"^(?:(?!\d).*?\s-\s)?\d{1,3}(?!\d)[-._)\s]+", "", stem))
     def fits(path: str, title: str) -> bool:
         # norm() drops brackets, so "Song" and "Song (Demo)" read the same. The
         # track's version has to show somewhere in the file's path, and the
