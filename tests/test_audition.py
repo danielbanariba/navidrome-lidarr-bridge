@@ -346,3 +346,18 @@ def test_a_grandchild_holding_the_pipes_does_not_hold_the_queue(tmp_path):
     output = queue.run_audition([sys.executable, "-c", child], timeout=1, grace=1, drain=2)
     assert time.time() - started < 15
     assert output.endswith("the audition ran past its timeout and was stopped")
+
+
+def test_file_names_that_start_with_the_artist_and_album_still_pair():
+    folder = "/x/Alestorm/No Grave But The Sea/Alestorm - No Grave But The Sea - "
+    paths = [folder + "01 No Grave But The Sea.flac", folder + "02 Mexico.flac",
+             folder + "03 To the End of the World.flac"]
+    tracks = [{"id": 1, "title": "No Grave but the Sea"}, {"id": 2, "title": "Mexico"},
+              {"id": 3, "title": "To the End of the World"}]
+    assert best.match_tracks(paths, tracks) == {1: paths[0], 2: paths[1], 3: paths[2]}
+
+
+def test_a_title_that_starts_with_a_number_keeps_it():
+    paths = ["/x/Album/05 - 3 AM.flac", "/x/Album/06 Sonata - 1. Allegro.flac"]
+    tracks = [{"id": 1, "title": "3 AM"}, {"id": 2, "title": "Sonata - 1. Allegro"}]
+    assert best.match_tracks(paths, tracks) == {1: paths[0], 2: paths[1]}
