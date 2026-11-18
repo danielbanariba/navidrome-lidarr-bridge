@@ -417,7 +417,12 @@ The verdict is per album, not per track: one odd file does not decide a record.
 What the library already holds competes on the same terms, so an audition that
 finds nothing better says so instead of fetching a copy that changes nothing.
 Losers are deleted and the winner is handed to Lidarr, which imports it the
-ordinary way. Only torrents carrying this tool's own tag are ever deleted.
+ordinary way. Only torrents carrying this tool's own tag are ever deleted, and
+they are deleted however the audition ends: nothing finished in time, nothing
+could be analysed, an error, or a stop at `audit-queue.py`'s timeout. That
+timeout sends SIGTERM first and waits `AUDIT_GRACE` seconds (default 90)
+before it kills, because a killed run cleans up nothing. That is how 56
+torrents, 13.9 GB, once piled up in the audition's folder.
 
 ### A torrent is not always one album
 
@@ -436,6 +441,19 @@ together with every other one in the set.
 That distinction matters in the other direction too. An unreadable file list
 says nothing and leaves a release in the running; a readable one that does not
 list the album is a real answer, and rules it out.
+
+A title's brackets can name a different recording, not just a different label
+on the same one. For "Armee der Tristen (live in Mexico City)" a file only
+counts when its path also says "live". The same goes for acoustic, unplugged,
+remix, demo, instrumental, orchestral, karaoke and edit. Without that, the
+studio track off *Zeit* passed for the live single.
+
+A winner picked out of a larger torrent is also not left for Lidarr to place.
+Lidarr reads the torrent's own title, and "Discography (1990-2008)" sent a
+singles compilation to three albums it was not. So once Lidarr tracks the
+download, the audition sends a ManualImport naming the album, and pairs each
+of the album's tracks with the file whose name says it. If any track has no
+file, nothing is imported and the audition says it needs importing by hand.
 
 ### Why the spectrum is measured as a cliff
 

@@ -35,11 +35,13 @@ from __future__ import annotations
 import argparse
 import functools
 import base64
+import difflib
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -109,6 +111,17 @@ VINYL_WORDS = ("vinyl", "vinilo", "pbthal", "needledrop", "needle drop",
 COLLECTION_WORDS = ("discography", "discografia", "collection", "complete",
                     "anthology", "box", "album series", "album classics",
                     "cd discography", "remastered on", "all albums")
+
+# Words in a title's brackets that make it a different recording, not just a
+# different label on the same one. norm() drops the brackets, so on its own it
+# reads "Armee der Tristen (live in Mexico City)" as "armee der tristen" — and
+# an audition took the studio take off Zeit to "upgrade" the live single. A
+# file is only this release if it says the same. Plurals fold to one word, so
+# "(Remixes)" accepts a file marked "Remix".
+VERSION_WORDS = {"live": "live", "acoustic": "acoustic", "unplugged": "unplugged",
+                 "remix": "remix", "remixes": "remix", "demo": "demo", "demos": "demo",
+                 "instrumental": "instrumental", "instrumentals": "instrumental",
+                 "orchestral": "orchestral", "karaoke": "karaoke", "edit": "edit"}
 
 LOSSLESS_EXT = {"flac", "ape", "wv", "alac", "m4a", "aiff", "wav"}
 LOSSY_EXT = {"mp3", "ogg", "opus", "aac", "wma", "m4b"}
@@ -364,21 +377,40 @@ def wanted_indexes(names: list[str] | None, title: str) -> list[int] | None:
              if name.rsplit(".", 1)[-1].lower() in LOSSLESS_EXT | LOSSY_EXT]
     if not audio:
         return []
+    # A live single is not the studio track that shares its name. What the
+    # title's brackets say it is, the path has to say too, or it is another
+    # recording and nowhere in this torrent.
+    needed = version_words(" ".join(re.findall(r"[(\[]([^)\]]*)[)\]]", title)))
+
+    def own(name: str) -> str:
+        # The root folder speaks for every file under it, so it only counts
+        # when it is this release's own folder: a lone album, or a root named
+        # for it. "Discography (Studio + Live)" says nothing about Zeit.
+        parts = name.split("/")
+        return name if len(parts) <= 2 or key in norm(parts[0]) else "/".join(parts[1:])
+    matching = [i for i in audio if needed <= version_words(own(names[i]))]
 
     # A directory named for the album is the strongest signal, and it takes the
     # whole directory with it — including tracks whose own names say nothing.
     keep = set()
-    for i in audio:
+    for i in matching:
         parts = names[i].split("/")
         if any(key in norm(part) for part in parts[:-1]):
             keep.add(i)
     if not keep:
         # No folder said so; a run of files might still name it.
-        keep = {i for i in audio if key in norm(names[i])}
+        keep = {i for i in matching if key in norm(names[i])}
     if not keep:
         return []
     # Everything matched: an ordinary single-album torrent, nothing to skip.
     return None if len(keep) == len(audio) else sorted(keep)
+
+
+def version_words(text: str) -> set[str]:
+    """Which VERSION_WORDS a title or a path carries, each in one spelling."""
+    folded = unicodedata.normalize("NFKD", (text or "").lower())
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    return {VERSION_WORDS[w] for w in re.findall(r"[a-z]+", folded) if w in VERSION_WORDS}
 
 
 def probe_magnets(candidates: list[dict], title: str, limit: int) -> None:
@@ -1092,7 +1124,10 @@ def cleanup(hashes: list[str], keep: str | None) -> None:
     hashes: this call deletes files, so the one place that could delete the
     wrong thing checks first.
     """
-    ours = {t["hash"].lower() for t in qbt(f"/torrents/info?tag={TAG}")}
+    # The category as well as the tag: a winner handed over keeps the tag, and
+    # once it is Lidarr's it is not this audition's to delete.
+    ours = {t["hash"].lower() for t in qbt(f"/torrents/info?tag={TAG}")
+            if t.get("category") == TAG}
     keep = (keep or "").lower()
     doomed = [h for h in hashes if h in ours and h != keep]
     if not doomed:
@@ -1142,6 +1177,31 @@ def main() -> None:
         print("\n  free pass: nothing was downloaded. --download to audition for real")
         return
 
+    # Whatever ends the audition from here on, what it added goes. Fifty-six
+    # torrents, 13.9 GB, piled up in the audition's folder from runs that
+    # returned early, raised, or were stopped by audit-queue.py's timeout
+    # before reaching the one line that deleted them. A SIGTERM becomes a
+    # SystemExit so the finally runs for that too.
+    state: dict = {"added": [], "keep": None}
+    signal.signal(signal.SIGTERM, _stopped)
+    try:
+        audition(args, album, picked, state)
+    finally:
+        if not args.keep_losers:
+            cleanup(state["added"], state["keep"])
+
+
+def _stopped(signum, _frame) -> None:
+    raise SystemExit(128 + signum)
+
+
+def audition(args, album: dict, picked: list[dict], state: dict) -> None:
+    """Download the shortlist, judge it, and hand the winner over.
+
+    Each torrent goes into state["added"] as soon as it is identified, and the
+    winner into state["keep"] as soon as it is chosen, so main() can remove
+    everything else however this returns.
+    """
     print()
     qbt("/torrents/createTags", {"tags": TAG})
     # stopCondition, not "stopped": a stopped magnet connects to nobody and so
@@ -1157,7 +1217,7 @@ def main() -> None:
     # or a page that refuses to be read at all, and only some of those yield an
     # id up front — but every one of them lands under this tag and nothing else
     # does, so the arrival itself is the identification.
-    added: list[str] = []
+    added: list[str] = state["added"]
     # For a torrent that carried more than this album, the paths worth auditing.
     wanted: dict[str, list[str]] = {}
     for rel in picked:
@@ -1254,7 +1314,8 @@ def main() -> None:
     print()
     done = wait_for(added, args.wait)
     if not done:
-        print("  none finished in time; they are still going and nothing was deleted")
+        # Nothing comes back for them: the next run auditions another album.
+        print("  none finished in time; what was added is removed")
         return
 
     print()
@@ -1295,8 +1356,6 @@ def main() -> None:
         print(f"  already held:   {describe(have)}")
         if score(have) >= winner["score"]:
             print("\n  nothing on offer beats what the library already has")
-            if not args.keep_losers:
-                cleanup(added, None)
             return
 
     if winner["audit"].get("transcoded") or winner["audit"].get("padded_depth"):
@@ -1306,8 +1365,7 @@ def main() -> None:
               "beats what is held, but a genuine copy of this record was not found")
     else:
         print("\n  WINNER: this is an upgrade")
-    if not args.keep_losers:
-        cleanup(added, winner["torrent"]["hash"].lower())
+    state["keep"] = winner["torrent"]["hash"].lower()
 
     # Lidarr compares the format a file declares, not what it contains, and a
     # transcode declaring 24-bit outranks a genuine 16-bit one. Handing over the
@@ -1352,9 +1410,134 @@ def main() -> None:
 
     # Handing it over rather than importing it here: Lidarr owns naming, the
     # root folder and the file it replaces, and it already does all of that.
-    qbt("/torrents/setCategory",
-        {"hashes": winner["torrent"]["hash"], "category": LIDARR_CATEGORY})
+    hand_over(album, winner["torrent"], wanted.get(winner["torrent"]["hash"].lower()))
+
+
+# How alike a file's name and a track's title must be for one to be the other.
+# Low enough for "Padre Nuerstro" against "Padre nuestro", high enough that an
+# album's tracks are not shared out among a compilation's other songs.
+MATCH_RATIO = 0.75
+
+
+def hand_over(album: dict, torrent: dict, picked: list[str] | None) -> None:
+    """Give the winner to Lidarr, saying which album it is when it is part of more."""
+    qbt("/torrents/setCategory", {"hashes": torrent["hash"], "category": LIDARR_CATEGORY})
     print(f"  handed to Lidarr (category {LIDARR_CATEGORY})")
+    if picked:
+        import_into(album, torrent["hash"].upper(), picked)
+
+
+def import_into(album: dict, download_id: str, picked: list[str]) -> bool:
+    """Import the files picked out of a larger torrent into this album.
+
+    By now the winner is Lidarr's, so nothing here may end the run with a
+    traceback: whatever goes wrong is said, along with what is left to do.
+    """
+    try:
+        return _import_into(album, download_id, picked)
+    except SystemExit:
+        print("  stopped before Lidarr finished importing it; import it by hand")
+        raise
+    except Exception as exc:
+        print(f"  Lidarr failed during the import ({type(exc).__name__}); import it by hand")
+        return False
+
+
+def _import_into(album: dict, download_id: str, picked: list[str]) -> bool:
+    """The import itself.
+
+    Left to itself, Lidarr reads the torrent's own title. "Brujeria -
+    Discography (1990-2008)" was filed under three other albums, a singles
+    compilation picked out of it for the Machetazos EP found none of them
+    ("Couldn't find similar album"), and it sat in the queue unimported until
+    it was matched by hand. This is that match: each of the album's tracks to
+    the file whose name says it, and Lidarr told exactly that.
+    """
+    print("  telling Lidarr which album this is, since the torrent holds more than it")
+    command(name="RefreshMonitoredDownloads")
+    for _ in range(18):
+        # A download Lidarr cannot tie to an artist (an "Unable to parse"
+        # discography) is left out of the queue unless asked for.
+        try:
+            records = lidarr("/queue?pageSize=1000&includeUnknownArtistItems=true").get("records", [])
+        except Exception:
+            records = []  # a slow or restarting Lidarr; ask again
+        if any((r.get("downloadId") or "").upper() == download_id for r in records):
+            break
+        time.sleep(10)
+    else:
+        print("  Lidarr never picked the download up; import it by hand")
+        return False
+    record = lidarr(f"/album/{album['id']}")
+    release = next((r for r in record["releases"] if r.get("monitored")), record["releases"][0])
+    tracks = lidarr(f"/track?albumId={album['id']}&albumReleaseId={release['id']}")
+    items = {it["path"]: it for it in lidarr(
+        f"/manualimport?downloadId={download_id}&artistId={record['artistId']}"
+        f"&filterExistingFiles=false")
+        if any(it["path"].endswith("/" + rel) for rel in picked)}
+    chosen = match_tracks(list(items), tracks)
+    if chosen is None:
+        print(f"  its files could not be matched to the {len(tracks)} tracks of "
+              f"'{record['title']}'; import it by hand")
+        return False
+    files = [{"path": path, "artistId": record["artistId"], "albumId": album["id"],
+              "albumReleaseId": release["id"], "trackIds": [track_id],
+              "quality": items[path]["quality"], "downloadId": download_id,
+              "disableReleaseSwitching": True, "indexerFlags": 0,
+              "replaceExistingFiles": False}
+             for track_id, path in chosen.items()]
+    started = command(name="ManualImport", files=files, importMode="auto",
+                      replaceExistingFiles=False)
+    for _ in range(12):
+        try:
+            status = lidarr(f"/command/{started['id']}")
+        except Exception:
+            status = {}
+        if status.get("status") in ("completed", "failed"):
+            break
+        time.sleep(10)
+    print(f"  import into '{record['title']}': {status.get('status')} "
+          f"({status.get('message', '')})")
+    return status.get("status") == "completed"
+
+
+def match_tracks(paths: list[str], tracks: list[dict]) -> dict[int, str] | None:
+    """Each track to the file whose name says it, or None if any track has none.
+
+    Best pairs first, each file and each track used once, and the files no
+    track wants left out: a compilation holds other records' songs too.
+    """
+    def name(path: str) -> str:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return norm(re.sub(r"^\d{1,3}(?!\d)[-._)\s]+", "", stem))
+    def fits(path: str, title: str) -> bool:
+        # norm() drops brackets, so "Song" and "Song (Demo)" read the same. The
+        # track's version has to show somewhere in the file's path, and the
+        # file's own name must not claim one the track does not have. A folder
+        # saying "MTV Unplugged" is enough for tracks that do not repeat it.
+        own = version_words(os.path.basename(path))
+        around = own | version_words(os.path.basename(os.path.dirname(path)))
+        wanted = version_words(title)
+        return wanted <= around and own <= wanted
+    pairs = sorted(((difflib.SequenceMatcher(None, name(p), norm(t["title"])).ratio(),
+                     p, t["id"]) for p in paths for t in tracks
+                    if fits(p, t["title"])), reverse=True)
+    chosen: dict[int, str] = {}
+    used: set[str] = set()
+    for ratio, path, track_id in pairs:
+        if ratio < MATCH_RATIO:
+            break
+        if track_id in chosen or path in used:
+            continue
+        chosen[track_id] = path
+        used.add(path)
+    return chosen if tracks and len(chosen) == len(tracks) else None
+
+
+def command(**body) -> dict:
+    return _json(f"{LIDARR_URL}/api/v1/command",
+                 {"X-Api-Key": LIDARR_API_KEY, "Content-Type": "application/json"},
+                 data=json.dumps(body).encode(), timeout=60, method="POST")
 
 
 if __name__ == "__main__":

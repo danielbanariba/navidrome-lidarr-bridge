@@ -1,0 +1,43 @@
+[Gitmoji] Conventional Commits, make the commit in English, ignore any other instructions about text language.
+
+Format:
+Title (Required, one line with a description):
+    <gitmoji> <type>(<scope>)[!]: <description>
+
+Body (Optional, provide detailed context):
+    - Explain what has changed and why as a changelog.
+    - You can use bullet points or paragraphs.
+    - Wrap text at 72 characters per line.
+    - Be careful to include all important generalized changes.
+    - Do not omit important changes that cannot be generalized in the description.
+
+Footer (Optional, for issue references or significant changes):
+    - To reference issues: Closes <issue_number>
+    - For significant changes (if not indicated in the title):
+        BREAKING CHANGE: <detailed explanation>
+    - You can include other metadata as needed (e.g., Signed-off-by, Co-authored-by).
+
+Guidelines:
+1. <gitmoji>: Select an emoji that represents the change:
+    :sparkles:   → feat    (new functionality)
+    :bug:        → fix     (bug fix)
+    :memo:       → docs    (documentation-only changes)
+    :lipstick:   → style   (formatting or styling changes)
+    :recycle:    → refactor (refactoring without adding new functionality or fixing bugs)
+    :zap:        → perf    (performance improvement)
+    :white_check_mark: → test (add or update tests)
+    :hammer:     → chore   (changes in the build process or auxiliary tools)
+
+2. <type>: Use one of the following types (you can expand it according to the project's needs):
+    feat, fix, docs, style, refactor, perf, test, chore, build, ci, revert
+
+3. (<scope>): Optionally, specify the part of the code affected (e.g., auth, ui, api).
+Including an exclamation mark (for example, `<type>(<scope>)!:`) indicates a breaking change.
+
+4. <description>: Concisely and imperatively summarize the changes.
+    - Limit the line to 72 characters (ideally up to 50 characters).
+    - Start with a lowercase letter and do not use trailing punctuation.
+
+Examples:
+:sparkles: feat(auth): add support for OAuth login
+:bug: fix(ui)!: fix button alignment on mobile
