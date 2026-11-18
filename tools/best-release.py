@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import functools
 import base64
+import difflib
 import hashlib
 import json
 import os
@@ -1399,9 +1400,100 @@ def audition(args, album: dict, picked: list[dict], state: dict) -> None:
 
     # Handing it over rather than importing it here: Lidarr owns naming, the
     # root folder and the file it replaces, and it already does all of that.
-    qbt("/torrents/setCategory",
-        {"hashes": winner["torrent"]["hash"], "category": LIDARR_CATEGORY})
+    hand_over(album, winner["torrent"], wanted.get(winner["torrent"]["hash"].lower()))
+
+
+# How alike a file's name and a track's title must be for one to be the other.
+# Low enough for "Padre Nuerstro" against "Padre nuestro", high enough that an
+# album's tracks are not shared out among a compilation's other songs.
+MATCH_RATIO = 0.75
+
+
+def hand_over(album: dict, torrent: dict, picked: list[str] | None) -> None:
+    """Give the winner to Lidarr, saying which album it is when it is part of more."""
+    qbt("/torrents/setCategory", {"hashes": torrent["hash"], "category": LIDARR_CATEGORY})
     print(f"  handed to Lidarr (category {LIDARR_CATEGORY})")
+    if picked:
+        import_into(album, torrent["hash"].upper(), picked)
+
+
+def import_into(album: dict, download_id: str, picked: list[str]) -> bool:
+    """Import the files picked out of a larger torrent into this album.
+
+    Left to itself, Lidarr reads the torrent's own title. "Brujeria -
+    Discography (1990-2008)" was filed under three other albums, a singles
+    compilation picked out of it for the Machetazos EP found none of them
+    ("Couldn't find similar album"), and it sat in the queue unimported until
+    it was matched by hand. This is that match: each of the album's tracks to
+    the file whose name says it, and Lidarr told exactly that.
+    """
+    print("  telling Lidarr which album this is, since the torrent holds more than it")
+    command(name="RefreshMonitoredDownloads")
+    for _ in range(18):
+        records = lidarr("/queue?pageSize=200").get("records", [])
+        if any((r.get("downloadId") or "").upper() == download_id for r in records):
+            break
+        time.sleep(10)
+    else:
+        print("  Lidarr never picked the download up; import it by hand")
+        return False
+    record = lidarr(f"/album/{album['id']}")
+    release = next((r for r in record["releases"] if r.get("monitored")), record["releases"][0])
+    tracks = lidarr(f"/track?albumId={album['id']}&albumReleaseId={release['id']}")
+    items = {it["path"]: it for it in lidarr(
+        f"/manualimport?downloadId={download_id}&artistId={record['artistId']}"
+        f"&filterExistingFiles=false")
+        if any(it["path"].endswith("/" + rel) for rel in picked)}
+    chosen = match_tracks(list(items), tracks)
+    if chosen is None:
+        print(f"  its files could not be matched to the {len(tracks)} tracks of "
+              f"'{record['title']}'; import it by hand")
+        return False
+    files = [{"path": path, "artistId": record["artistId"], "albumId": album["id"],
+              "albumReleaseId": release["id"], "trackIds": [track_id],
+              "quality": items[path]["quality"], "downloadId": download_id,
+              "disableReleaseSwitching": True, "indexerFlags": 0,
+              "replaceExistingFiles": False}
+             for track_id, path in chosen.items()]
+    started = command(name="ManualImport", files=files, importMode="auto",
+                      replaceExistingFiles=False)
+    for _ in range(12):
+        status = lidarr(f"/command/{started['id']}")
+        if status.get("status") in ("completed", "failed"):
+            break
+        time.sleep(10)
+    print(f"  import into '{record['title']}': {status.get('status')} "
+          f"({status.get('message', '')})")
+    return status.get("status") == "completed"
+
+
+def match_tracks(paths: list[str], tracks: list[dict]) -> dict[int, str] | None:
+    """Each track to the file whose name says it, or None if any track has none.
+
+    Best pairs first, each file and each track used once, and the files no
+    track wants left out: a compilation holds other records' songs too.
+    """
+    def name(path: str) -> str:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return norm(re.sub(r"^\d{1,3}(?!\d)[-._)\s]+", "", stem))
+    pairs = sorted(((difflib.SequenceMatcher(None, name(p), norm(t["title"])).ratio(),
+                     p, t["id"]) for p in paths for t in tracks), reverse=True)
+    chosen: dict[int, str] = {}
+    used: set[str] = set()
+    for ratio, path, track_id in pairs:
+        if ratio < MATCH_RATIO:
+            break
+        if track_id in chosen or path in used:
+            continue
+        chosen[track_id] = path
+        used.add(path)
+    return chosen if tracks and len(chosen) == len(tracks) else None
+
+
+def command(**body) -> dict:
+    return _json(f"{LIDARR_URL}/api/v1/command",
+                 {"X-Api-Key": LIDARR_API_KEY, "Content-Type": "application/json"},
+                 data=json.dumps(body).encode(), timeout=60, method="POST")
 
 
 if __name__ == "__main__":

@@ -75,11 +75,14 @@ HASH = "a" * 40
 class FakeClient:
     """Just enough of qBittorrent for one audition to add a torrent and delete it."""
 
-    def __init__(self):
+    def __init__(self, files=None):
         self.torrents: dict[str, dict] = {}
         self.deleted: list[str] = []
+        self.files = [{"index": i, "name": n} for i, n in enumerate(files or [])]
 
     def __call__(self, path, fields=None, timeout=60):
+        if path.startswith("/torrents/files"):
+            return self.files
         if path.startswith("/torrents/info"):
             return [{"hash": h, **t} for h, t in self.torrents.items()]
         if path == "/torrents/delete":
@@ -92,12 +95,16 @@ class FakeClient:
         self.torrents[HASH] = {"state": "stalledDL", "progress": 0.0, "tags": best.TAG}
 
 
-def run_main(monkeypatch, wait_for, *extra, client=None):
+ZEIT = {"id": 1, "title": "Zeit", "artist": "Rammstein"}
+
+
+def run_main(monkeypatch, wait_for, *extra, client=None, album=ZEIT, picked=None):
     client = client or FakeClient()
+    picked = picked or [{"title": "Rammstein - Zeit [FLAC]", "downloadUrl": "http://x"}]
     monkeypatch.setattr(best, "qbt", client)
     monkeypatch.setattr(best, "qbt_add", client.add)
-    monkeypatch.setattr(best, "find_album", lambda args: {"id": 1, "title": "Zeit", "artist": "Rammstein"})
-    monkeypatch.setattr(best, "shortlist", lambda *a, **k: [{"title": "Rammstein - Zeit [FLAC]", "downloadUrl": "http://x"}])
+    monkeypatch.setattr(best, "find_album", lambda args: album)
+    monkeypatch.setattr(best, "shortlist", lambda *a, **k: picked)
     monkeypatch.setattr(best, "wait_for", wait_for)
     monkeypatch.setattr(best.shutil, "which", lambda tool: "/usr/bin/" + tool)
     monkeypatch.setattr(best.time, "sleep", lambda s: None)
@@ -140,3 +147,114 @@ def test_a_timed_out_audition_is_asked_to_stop_before_it_is_killed(tmp_path):
     assert marker.read_text() == "ok"
     assert "started" in output
     assert output.endswith("the audition ran past its timeout and was stopped")
+
+
+# ── what Lidarr is told ───────────────────────────────────────────────────
+
+SINGLES = "Brujeria [Discography]/(2006) Machetazos! (The Singles)"
+SINGLES_FILES = [f"{SINGLES}/{n}.mp3" for n in (
+    "01-Marijuana", "02-Matando Gueros '97", "03-Grito De Los Brujos", "04-Padre Nuerstro",
+    "05-Molestando Ninos Muertos", "06-Grito De Los Soldados Poseidos",
+    "07-Machetazos (Sacrificio II)", "08-Castigo Del Brujo", "09-Cristo De La Roca",
+    "10-El Patron", "11-Hermanos Menendez", "12-Seis Seis Seis")]
+# The rest of the discography, which the audition skips.
+TORRENT_FILES = SINGLES_FILES + [
+    "Brujeria [Discography]/(1993) Matando Gueros/01-Pura De Venta.mp3",
+    "Brujeria [Discography]/(1995) Raza Odiada/01-Raza Odiada.mp3"]
+EP_TRACKS = [{"id": 900 + n, "title": t} for n, t in enumerate((
+    "Padre nuestro", "Molestando niños muertos", "Grito de los soldados poseídos",
+    "Machetazos (Sacrificio II)", "Castigo del brujo", "Cristo de la roca"), 1)]
+
+
+class FakeLidarr:
+    """Lidarr's side of one handoff: the album, its tracks, and what it is told."""
+
+    def __init__(self, tracked=True):
+        self.tracked = tracked
+        self.commands: list[dict] = []
+
+    def get(self, path):
+        if path.startswith("/queue"):
+            return {"records": [{"downloadId": HASH.upper()}] if self.tracked else []}
+        if path == "/album/970":
+            return {"id": 970, "artistId": 5, "title": "Machetazos",
+                    "releases": [{"id": 77, "monitored": True, "trackCount": 6}]}
+        if path.startswith("/track?albumId=970&albumReleaseId=77"):
+            return EP_TRACKS
+        if path.startswith(f"/manualimport?downloadId={HASH.upper()}"):
+            return [{"path": f"/data/torrents/{best.TAG}/{rel}", "quality": {"quality": {"name": "MP3-320"}}}
+                    for rel in TORRENT_FILES]
+        if path.startswith("/command/"):
+            return {"status": "completed", "message": "Manually imported 6 files"}
+        raise AssertionError(f"unexpected GET {path}")
+
+    def post(self, url, headers, data=None, timeout=120, method=None):
+        body = __import__("json").loads(data)
+        self.commands.append(body)
+        return {"id": len(self.commands), "status": "started"}
+
+
+def hand_over_singles(monkeypatch, tmp_path, fake):
+    """One audition whose winner is the singles folder inside a Brujería discography."""
+    (tmp_path / "torrents" / best.TAG / SINGLES).mkdir(parents=True)
+    torrent = {"hash": HASH, "name": "Brujeria - Discography (1990-2008)",
+               "save_path": f"/data/torrents/{best.TAG}",
+               "content_path": f"/data/torrents/{best.TAG}/Brujeria [Discography]"}
+    monkeypatch.setattr(best, "PATH_TO", str(tmp_path))
+    monkeypatch.setattr(best, "audit_album", lambda folder: {"tracks": 12})
+    monkeypatch.setattr(best, "score", lambda audit: (1,))
+    monkeypatch.setattr(best, "describe", lambda audit: "mp3 320")
+    monkeypatch.setattr(best, "incumbent", lambda *a: None)
+    monkeypatch.setattr(best, "lidarr", fake.get)
+    monkeypatch.setattr(best, "_json", fake.post)
+    client = FakeClient(TORRENT_FILES)
+    run_main(monkeypatch, lambda hashes, minutes: [torrent], client=client,
+             album={"id": 970, "title": "Machetazos", "artist": "Brujería"},
+             picked=[{"title": "Brujeria - Discography (1990-2008) [mp3@128-320]",
+                      "downloadUrl": "http://x", "_files": TORRENT_FILES,
+                      "_want": list(range(len(SINGLES_FILES)))}])
+    return client
+
+
+def test_an_album_picked_out_of_a_larger_torrent_is_imported_into_that_album(monkeypatch, tmp_path):
+    fake = FakeLidarr()
+    hand_over_singles(monkeypatch, tmp_path, fake)
+
+    imports = [c for c in fake.commands if c["name"] == "ManualImport"]
+    assert len(imports) == 1
+    files = imports[0]["files"]
+    assert {f["albumId"] for f in files} == {970}
+    assert {f["albumReleaseId"] for f in files} == {77}
+    assert {f["downloadId"] for f in files} == {HASH.upper()}
+    mapped = {f["trackIds"][0]: f["path"].rsplit("/", 1)[-1] for f in files}
+    assert mapped == {901: "04-Padre Nuerstro.mp3", 902: "05-Molestando Ninos Muertos.mp3",
+                      903: "06-Grito De Los Soldados Poseidos.mp3",
+                      904: "07-Machetazos (Sacrificio II).mp3", 905: "08-Castigo Del Brujo.mp3",
+                      906: "09-Cristo De La Roca.mp3"}
+
+
+def test_an_album_missing_a_track_from_the_files_is_not_imported_half_way(monkeypatch, tmp_path):
+    fake = FakeLidarr()
+    tracks = EP_TRACKS + [{"id": 907, "title": "Demoniaco"}]
+    real_get = fake.get
+    monkeypatch.setattr(fake, "get", lambda path: tracks if path.startswith("/track?") else real_get(path))
+    hand_over_singles(monkeypatch, tmp_path, fake)
+    assert [c["name"] for c in fake.commands] == ["RefreshMonitoredDownloads"]
+
+
+def test_a_download_lidarr_never_tracks_is_not_imported(monkeypatch, tmp_path):
+    # Imported while Lidarr is not tracking it, "auto" means move: the files
+    # would leave the torrent's folder and the client would lose them.
+    fake = FakeLidarr(tracked=False)
+    hand_over_singles(monkeypatch, tmp_path, fake)
+    assert [c["name"] for c in fake.commands] == ["RefreshMonitoredDownloads"]
+
+
+def test_a_whole_album_torrent_is_still_only_handed_over(monkeypatch):
+    fake = FakeLidarr()
+    calls = []
+    monkeypatch.setattr(best, "qbt", lambda path, fields=None, timeout=60: calls.append((path, fields)))
+    monkeypatch.setattr(best, "_json", fake.post)
+    best.hand_over(ZEIT, {"hash": HASH}, None)
+    assert calls == [("/torrents/setCategory", {"hashes": HASH, "category": best.LIDARR_CATEGORY})]
+    assert fake.commands == []
