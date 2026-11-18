@@ -40,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -1165,6 +1166,31 @@ def main() -> None:
         print("\n  free pass: nothing was downloaded. --download to audition for real")
         return
 
+    # Whatever ends the audition from here on, what it added goes. Fifty-six
+    # torrents, 13.9 GB, piled up in the audition's folder from runs that
+    # returned early, raised, or were stopped by audit-queue.py's timeout
+    # before reaching the one line that deleted them. A SIGTERM becomes a
+    # SystemExit so the finally runs for that too.
+    state: dict = {"added": [], "keep": None}
+    signal.signal(signal.SIGTERM, _stopped)
+    try:
+        audition(args, album, picked, state)
+    finally:
+        if not args.keep_losers:
+            cleanup(state["added"], state["keep"])
+
+
+def _stopped(signum, _frame) -> None:
+    raise SystemExit(128 + signum)
+
+
+def audition(args, album: dict, picked: list[dict], state: dict) -> None:
+    """Download the shortlist, judge it, and hand the winner over.
+
+    Each torrent goes into state["added"] as soon as it is identified, and the
+    winner into state["keep"] as soon as it is chosen, so main() can remove
+    everything else however this returns.
+    """
     print()
     qbt("/torrents/createTags", {"tags": TAG})
     # stopCondition, not "stopped": a stopped magnet connects to nobody and so
@@ -1180,7 +1206,7 @@ def main() -> None:
     # or a page that refuses to be read at all, and only some of those yield an
     # id up front — but every one of them lands under this tag and nothing else
     # does, so the arrival itself is the identification.
-    added: list[str] = []
+    added: list[str] = state["added"]
     # For a torrent that carried more than this album, the paths worth auditing.
     wanted: dict[str, list[str]] = {}
     for rel in picked:
@@ -1277,7 +1303,8 @@ def main() -> None:
     print()
     done = wait_for(added, args.wait)
     if not done:
-        print("  none finished in time; they are still going and nothing was deleted")
+        # Nothing comes back for them: the next run auditions another album.
+        print("  none finished in time; what was added is removed")
         return
 
     print()
@@ -1318,8 +1345,6 @@ def main() -> None:
         print(f"  already held:   {describe(have)}")
         if score(have) >= winner["score"]:
             print("\n  nothing on offer beats what the library already has")
-            if not args.keep_losers:
-                cleanup(added, None)
             return
 
     if winner["audit"].get("transcoded") or winner["audit"].get("padded_depth"):
@@ -1329,8 +1354,7 @@ def main() -> None:
               "beats what is held, but a genuine copy of this record was not found")
     else:
         print("\n  WINNER: this is an upgrade")
-    if not args.keep_losers:
-        cleanup(added, winner["torrent"]["hash"].lower())
+    state["keep"] = winner["torrent"]["hash"].lower()
 
     # Lidarr compares the format a file declares, not what it contains, and a
     # transcode declaring 24-bit outranks a genuine 16-bit one. Handing over the

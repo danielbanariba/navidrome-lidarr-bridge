@@ -59,3 +59,84 @@ def test_a_live_single_still_finds_its_live_recording():
 
 def test_a_title_without_a_qualifier_still_finds_its_album_in_a_discography():
     assert best.wanted_indexes(RAMMSTEIN, "Zeit") == [1, 2]
+
+
+# ── what an audition leaves behind ────────────────────────────────────────
+
+import signal  # noqa: E402
+
+import pytest  # noqa: E402
+
+queue = load("audit_queue_audition", "tools/audit-queue.py")
+
+HASH = "a" * 40
+
+
+class FakeClient:
+    """Just enough of qBittorrent for one audition to add a torrent and delete it."""
+
+    def __init__(self):
+        self.torrents: dict[str, dict] = {}
+        self.deleted: list[str] = []
+
+    def __call__(self, path, fields=None, timeout=60):
+        if path.startswith("/torrents/info"):
+            return [{"hash": h, **t} for h, t in self.torrents.items()]
+        if path == "/torrents/delete":
+            for h in fields["hashes"].split("|"):
+                self.torrents.pop(h, None)
+                self.deleted.append(h)
+        return "Ok."
+
+    def add(self, raw, url, fields):
+        self.torrents[HASH] = {"state": "stalledDL", "progress": 0.0, "tags": best.TAG}
+
+
+def run_main(monkeypatch, wait_for, *extra, client=None):
+    client = client or FakeClient()
+    monkeypatch.setattr(best, "qbt", client)
+    monkeypatch.setattr(best, "qbt_add", client.add)
+    monkeypatch.setattr(best, "find_album", lambda args: {"id": 1, "title": "Zeit", "artist": "Rammstein"})
+    monkeypatch.setattr(best, "shortlist", lambda *a, **k: [{"title": "Rammstein - Zeit [FLAC]", "downloadUrl": "http://x"}])
+    monkeypatch.setattr(best, "wait_for", wait_for)
+    monkeypatch.setattr(best.shutil, "which", lambda tool: "/usr/bin/" + tool)
+    monkeypatch.setattr(best.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sys, "argv", ["best-release.py", "--album-id", "1", "--download", *extra])
+    saved = signal.getsignal(signal.SIGTERM)
+    try:
+        best.main()
+    finally:
+        signal.signal(signal.SIGTERM, saved)
+    return client
+
+
+def test_an_audition_where_nothing_finished_removes_what_it_added(monkeypatch):
+    client = run_main(monkeypatch, lambda hashes, minutes: [])
+    assert client.deleted == [HASH]
+
+
+def test_an_audition_stopped_by_sigterm_removes_what_it_added(monkeypatch):
+    def stopped_while_waiting(hashes, minutes):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return []
+    client = FakeClient()
+    with pytest.raises(SystemExit):
+        run_main(monkeypatch, stopped_while_waiting, client=client)
+    assert client.deleted == [HASH]
+
+
+def test_keep_losers_still_leaves_them_in_place(monkeypatch):
+    client = run_main(monkeypatch, lambda hashes, minutes: [], "--keep-losers")
+    assert client.deleted == [] and HASH in client.torrents
+
+
+def test_a_timed_out_audition_is_asked_to_stop_before_it_is_killed(tmp_path):
+    marker = tmp_path / "cleaned"
+    child = ("import pathlib, signal, sys, time\n"
+             f"signal.signal(signal.SIGTERM, lambda *a: (pathlib.Path({str(marker)!r}).write_text('ok'), sys.exit(0)))\n"
+             "print('started', flush=True)\n"
+             "time.sleep(30)\n")
+    output = queue.run_audition([sys.executable, "-c", child], timeout=1, grace=10)
+    assert marker.read_text() == "ok"
+    assert "started" in output
+    assert output.endswith("the audition ran past its timeout and was stopped")

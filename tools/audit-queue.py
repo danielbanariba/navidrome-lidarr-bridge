@@ -60,6 +60,11 @@ UNANSWERED_HOURS = float(os.environ.get("AUDIT_UNANSWERED_HOURS", "6"))
 # Long enough for a slow swarm, short enough that a timer firing every half
 # hour never overlaps with itself.
 TIMEOUT = int(os.environ.get("AUDIT_TIMEOUT", "1500"))
+# What a stopped audition gets to remove what it added. subprocess.run kills
+# on timeout, and a killed run cleans up nothing: that is how the audition's
+# folder filled with torrents nobody would ever judge. Still inside the half
+# hour, and inside the unit's TimeoutStartSec.
+GRACE = int(os.environ.get("AUDIT_GRACE", "90"))
 
 LOSSY = {"mp3", "aac", "m4a", "ogg", "opus", "wma"}
 
@@ -227,6 +232,28 @@ def read_verdict(output: str) -> tuple[str, str]:
     return "unclear", "the audition ended without a recognisable verdict"
 
 
+def run_audition(cmd: list[str], timeout: float = TIMEOUT,
+                 grace: float = GRACE) -> str:
+    """Run one audition and return everything it printed.
+
+    Past the timeout it is asked to stop (SIGTERM) and given the grace period
+    to clean up after itself; only a run that ignores that is killed.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd=ROOT)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return out + err
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            out, err = proc.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+        return (out or "") + (err or "") + "\n  the audition ran past its timeout and was stopped"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -267,16 +294,10 @@ def main() -> None:
         return
 
     started = time.time()
-    try:
-        done = subprocess.run(
-            [PYTHON, os.path.join(HERE, "best-release.py"),
-             "--album-id", str(target["albumId"]),
-             "--candidates", str(args.candidates), "--download"],
-            capture_output=True, text=True, timeout=TIMEOUT, cwd=ROOT)
-        output = done.stdout + done.stderr
-    except subprocess.TimeoutExpired as exc:
-        output = (exc.stdout or "") + (exc.stderr or "")
-        output += "\n  the audition ran past its timeout and was stopped"
+    output = run_audition(
+        [PYTHON, os.path.join(HERE, "best-release.py"),
+         "--album-id", str(target["albumId"]),
+         "--candidates", str(args.candidates), "--download"])
 
     verdict, note = read_verdict(output)
     print(output.strip()[-1500:])
