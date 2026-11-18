@@ -381,7 +381,14 @@ def wanted_indexes(names: list[str] | None, title: str) -> list[int] | None:
     # title's brackets say it is, the path has to say too, or it is another
     # recording and nowhere in this torrent.
     needed = version_words(" ".join(re.findall(r"[(\[]([^)\]]*)[)\]]", title)))
-    matching = [i for i in audio if needed <= version_words(names[i])]
+
+    def own(name: str) -> str:
+        # The root folder speaks for every file under it, so it only counts
+        # when it is this release's own folder: a lone album, or a root named
+        # for it. "Discography (Studio + Live)" says nothing about Zeit.
+        parts = name.split("/")
+        return name if len(parts) <= 2 or key in norm(parts[0]) else "/".join(parts[1:])
+    matching = [i for i in audio if needed <= version_words(own(names[i]))]
 
     # A directory named for the album is the strongest signal, and it takes the
     # whole directory with it — including tracks whose own names say nothing.
@@ -1117,7 +1124,10 @@ def cleanup(hashes: list[str], keep: str | None) -> None:
     hashes: this call deletes files, so the one place that could delete the
     wrong thing checks first.
     """
-    ours = {t["hash"].lower() for t in qbt(f"/torrents/info?tag={TAG}")}
+    # The category as well as the tag: a winner handed over keeps the tag, and
+    # once it is Lidarr's it is not this audition's to delete.
+    ours = {t["hash"].lower() for t in qbt(f"/torrents/info?tag={TAG}")
+            if t.get("category") == TAG}
     keep = (keep or "").lower()
     doomed = [h for h in hashes if h in ours and h != keep]
     if not doomed:
@@ -1430,7 +1440,9 @@ def import_into(album: dict, download_id: str, picked: list[str]) -> bool:
     print("  telling Lidarr which album this is, since the torrent holds more than it")
     command(name="RefreshMonitoredDownloads")
     for _ in range(18):
-        records = lidarr("/queue?pageSize=200").get("records", [])
+        # A download Lidarr cannot tie to an artist (an "Unable to parse"
+        # discography) is left out of the queue unless asked for.
+        records = lidarr("/queue?pageSize=1000&includeUnknownArtistItems=true").get("records", [])
         if any((r.get("downloadId") or "").upper() == download_id for r in records):
             break
         time.sleep(10)
@@ -1476,8 +1488,13 @@ def match_tracks(paths: list[str], tracks: list[dict]) -> dict[int, str] | None:
     def name(path: str) -> str:
         stem = os.path.splitext(os.path.basename(path))[0]
         return norm(re.sub(r"^\d{1,3}(?!\d)[-._)\s]+", "", stem))
+    def versions(path: str) -> set[str]:
+        return version_words(os.path.basename(os.path.dirname(path)) + " " + os.path.basename(path))
+    # norm() drops brackets, so "Song" and "Song (Demo)" read the same; a file
+    # and a track only pair when they name the same version.
     pairs = sorted(((difflib.SequenceMatcher(None, name(p), norm(t["title"])).ratio(),
-                     p, t["id"]) for p in paths for t in tracks), reverse=True)
+                     p, t["id"]) for p in paths for t in tracks
+                    if versions(p) == version_words(t["title"])), reverse=True)
     chosen: dict[int, str] = {}
     used: set[str] = set()
     for ratio, path, track_id in pairs:

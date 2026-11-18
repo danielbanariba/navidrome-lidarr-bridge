@@ -57,6 +57,16 @@ def test_a_live_single_still_finds_its_live_recording():
     assert best.wanted_indexes(names, "Armee der Tristen (live in Mexico City)") == [3]
 
 
+def test_a_discography_root_that_says_live_does_not_make_its_studio_takes_live():
+    names = [n.replace("Discography (1995-2022)", "Discography (Studio + Live)") for n in RAMMSTEIN]
+    assert best.wanted_indexes(names, "Armee der Tristen (live in Mexico City)") == []
+
+
+def test_a_live_single_whose_own_folder_says_live_is_taken_whole():
+    names = ["twenty one pilots - RAWFEAR (Live From The Bellwether) [FLAC]/01. RAWFEAR.flac"]
+    assert best.wanted_indexes(names, "RAWFEAR (Live From The Bellwether)") is None
+
+
 def test_a_title_without_a_qualifier_still_finds_its_album_in_a_discography():
     assert best.wanted_indexes(RAMMSTEIN, "Zeit") == [1, 2]
 
@@ -92,7 +102,8 @@ class FakeClient:
         return "Ok."
 
     def add(self, raw, url, fields):
-        self.torrents[HASH] = {"state": "stalledDL", "progress": 0.0, "tags": best.TAG}
+        self.torrents[HASH] = {"state": "stalledDL", "progress": 0.0, "tags": best.TAG,
+                               "category": fields["category"]}
 
 
 ZEIT = {"id": 1, "title": "Zeit", "artist": "Rammstein"}
@@ -169,13 +180,17 @@ EP_TRACKS = [{"id": 900 + n, "title": t} for n, t in enumerate((
 class FakeLidarr:
     """Lidarr's side of one handoff: the album, its tracks, and what it is told."""
 
-    def __init__(self, tracked=True):
+    def __init__(self, tracked=True, unknown_artist=False):
         self.tracked = tracked
+        # Lidarr leaves a download it cannot tie to an artist out of the
+        # queue unless includeUnknownArtistItems=true is asked for.
+        self.unknown_artist = unknown_artist
         self.commands: list[dict] = []
 
     def get(self, path):
         if path.startswith("/queue"):
-            return {"records": [{"downloadId": HASH.upper()}] if self.tracked else []}
+            hidden = self.unknown_artist and "includeUnknownArtistItems=true" not in path
+            return {"records": [{"downloadId": HASH.upper()}] if self.tracked and not hidden else []}
         if path == "/album/970":
             return {"id": 970, "artistId": 5, "title": "Machetazos",
                     "releases": [{"id": 77, "monitored": True, "trackCount": 6}]}
@@ -258,3 +273,25 @@ def test_a_whole_album_torrent_is_still_only_handed_over(monkeypatch):
     best.hand_over(ZEIT, {"hash": HASH}, None)
     assert calls == [("/torrents/setCategory", {"hashes": HASH, "category": best.LIDARR_CATEGORY})]
     assert fake.commands == []
+
+
+def test_a_download_lidarr_cannot_tie_to_an_artist_is_still_imported(monkeypatch, tmp_path):
+    fake = FakeLidarr(unknown_artist=True)
+    hand_over_singles(monkeypatch, tmp_path, fake)
+    assert [c["name"] for c in fake.commands] == ["RefreshMonitoredDownloads", "ManualImport"]
+
+
+def test_a_song_and_its_demo_are_not_swapped():
+    paths = ["/x/Album/01 Song.flac", "/x/Album/02 Song (Demo).flac"]
+    tracks = [{"id": 1, "title": "Song (Demo)"}, {"id": 2, "title": "Song"}]
+    assert best.match_tracks(paths, tracks) == {1: "/x/Album/02 Song (Demo).flac",
+                                                2: "/x/Album/01 Song.flac"}
+
+
+def test_cleanup_never_deletes_a_torrent_already_handed_to_lidarr(monkeypatch):
+    client = FakeClient()
+    client.torrents = {"b" * 40: {"tags": best.TAG, "category": best.TAG},
+                       "c" * 40: {"tags": best.TAG, "category": best.LIDARR_CATEGORY}}
+    monkeypatch.setattr(best, "qbt", client)
+    best.cleanup(["b" * 40, "c" * 40], None)
+    assert client.deleted == ["b" * 40]
