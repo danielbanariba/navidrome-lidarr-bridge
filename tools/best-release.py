@@ -110,6 +110,17 @@ COLLECTION_WORDS = ("discography", "discografia", "collection", "complete",
                     "anthology", "box", "album series", "album classics",
                     "cd discography", "remastered on", "all albums")
 
+# Words in a title's brackets that make it a different recording, not just a
+# different label on the same one. norm() drops the brackets, so on its own it
+# reads "Armee der Tristen (live in Mexico City)" as "armee der tristen" — and
+# an audition took the studio take off Zeit to "upgrade" the live single. A
+# file is only this release if it says the same. Plurals fold to one word, so
+# "(Remixes)" accepts a file marked "Remix".
+VERSION_WORDS = {"live": "live", "acoustic": "acoustic", "unplugged": "unplugged",
+                 "remix": "remix", "remixes": "remix", "demo": "demo", "demos": "demo",
+                 "instrumental": "instrumental", "instrumentals": "instrumental",
+                 "orchestral": "orchestral", "karaoke": "karaoke", "edit": "edit"}
+
 LOSSLESS_EXT = {"flac", "ape", "wv", "alac", "m4a", "aiff", "wav"}
 LOSSY_EXT = {"mp3", "ogg", "opus", "aac", "wma", "m4b"}
 UA = "navidrome-lidarr-bridge-audition/1.0"
@@ -364,21 +375,33 @@ def wanted_indexes(names: list[str] | None, title: str) -> list[int] | None:
              if name.rsplit(".", 1)[-1].lower() in LOSSLESS_EXT | LOSSY_EXT]
     if not audio:
         return []
+    # A live single is not the studio track that shares its name. What the
+    # title's brackets say it is, the path has to say too, or it is another
+    # recording and nowhere in this torrent.
+    needed = version_words(" ".join(re.findall(r"[(\[]([^)\]]*)[)\]]", title)))
+    matching = [i for i in audio if needed <= version_words(names[i])]
 
     # A directory named for the album is the strongest signal, and it takes the
     # whole directory with it — including tracks whose own names say nothing.
     keep = set()
-    for i in audio:
+    for i in matching:
         parts = names[i].split("/")
         if any(key in norm(part) for part in parts[:-1]):
             keep.add(i)
     if not keep:
         # No folder said so; a run of files might still name it.
-        keep = {i for i in audio if key in norm(names[i])}
+        keep = {i for i in matching if key in norm(names[i])}
     if not keep:
         return []
     # Everything matched: an ordinary single-album torrent, nothing to skip.
     return None if len(keep) == len(audio) else sorted(keep)
+
+
+def version_words(text: str) -> set[str]:
+    """Which VERSION_WORDS a title or a path carries, each in one spelling."""
+    folded = unicodedata.normalize("NFKD", (text or "").lower())
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    return {VERSION_WORDS[w] for w in re.findall(r"[a-z]+", folded) if w in VERSION_WORDS}
 
 
 def probe_magnets(candidates: list[dict], title: str, limit: int) -> None:
